@@ -126,7 +126,7 @@ func (s *posesTo3DScene) StreamTransformChanges(
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
-//	{"command": "draw"} - runs the camera's generate command and stores the
+//	{"command": "visualize"} - runs the camera's generate command and stores the
 //	returned poses as world-frame transforms for the visualizer. Optional
 //	"threshold" is forwarded to the camera, and "max_poses" (default 2000)
 //	caps how many poses are stored, sampled evenly.
@@ -138,7 +138,7 @@ func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface
 	}
 
 	switch command {
-	case "draw":
+	case "visualize":
 		camCmd := map[string]interface{}{"command": "generate"}
 		if t, ok := cmd["threshold"]; ok {
 			camCmd["threshold"] = t
