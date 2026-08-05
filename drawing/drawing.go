@@ -47,12 +47,15 @@ type Config struct {
 	// relative to the module's working directory.
 	ImagePath string `json:"image_path"`
 	// ZMM is the z value in millimeters used for the poses returned by the
-	// draw command; defaults to 0.
-	ZMM float64 `json:"z_mm"`
+	// draw command. Required.
+	ZMM *float64 `json:"z_mm"`
 }
 
-// Validate ensures the config is valid; all attributes are optional.
+// Validate ensures the config is valid; z_mm is required.
 func (c *Config) Validate(path string) ([]string, []string, error) {
+	if c.ZMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "z_mm")
+	}
 	return nil, nil, nil
 }
 
@@ -84,7 +87,7 @@ func newDrawing(
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		imagePath: imagePath,
-		zMM:       cfg.ZMM,
+		zMM:       *cfg.ZMM,
 	}, nil
 }
 
