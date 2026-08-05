@@ -46,6 +46,9 @@ type Config struct {
 	// ImagePath is the path to the PNG file to serve; defaults to "image.png"
 	// relative to the module's working directory.
 	ImagePath string `json:"image_path"`
+	// ZMM is the z value in millimeters used for the poses returned by the
+	// draw command; defaults to 0.
+	ZMM float64 `json:"z_mm"`
 }
 
 // Validate ensures the config is valid; all attributes are optional.
@@ -60,6 +63,7 @@ type drawingCamera struct {
 
 	logger    logging.Logger
 	imagePath string
+	zMM       float64
 }
 
 func newDrawing(
@@ -80,6 +84,7 @@ func newDrawing(
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		imagePath: imagePath,
+		zMM:       cfg.ZMM,
 	}, nil
 }
 
@@ -122,9 +127,11 @@ func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interfa
 // DoCommand handles arbitrary commands. Supported commands:
 //
 //	{"command": "draw"} - reads the configured PNG file and returns the dark
-//	pixels as [x, y] coordinates (in millimeters) over a 254mm x 254mm square.
-//	An optional "threshold" (0-255, default 128) sets the grayscale cutoff for
-//	which pixels are included.
+//	pixels as poses over a 254mm x 254mm square. Each pose has x and y in
+//	millimeters, z set to the configured z_mm attribute, and an orientation
+//	vector pointing straight down (0, 0, -1) with theta 0, suitable for use as
+//	a motion service Move destination. An optional "threshold" (0-255, default
+//	128) sets the grayscale cutoff for which pixels are included.
 func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -155,13 +162,21 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 		points := imageToPoints(img, threshold, squareSizeMM)
 		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm square", s.imagePath, len(points), squareSizeMM, squareSizeMM)
 
-		coords := make([]interface{}, len(points))
+		poses := make([]interface{}, len(points))
 		for i, p := range points {
-			coords[i] = []interface{}{p[0], p[1]}
+			poses[i] = map[string]interface{}{
+				"x":     p[0],
+				"y":     p[1],
+				"z":     s.zMM,
+				"o_x":   0.0,
+				"o_y":   0.0,
+				"o_z":   -1.0,
+				"theta": 0.0,
+			}
 		}
 		return map[string]interface{}{
-			"points":  coords,
-			"count":   len(points),
+			"poses":   poses,
+			"count":   len(poses),
 			"size_mm": squareSizeMM,
 		}, nil
 	default:
