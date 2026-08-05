@@ -17,7 +17,7 @@ func TestImageToPoints(t *testing.T) {
 	img.SetGray(0, 0, color.Gray{Y: 0})
 	img.SetGray(3, 1, color.Gray{Y: 0})
 
-	points := imageToPoints(img, 128, 254.0)
+	points := imageToPoints(img, 128, 254.0, 254.0)
 
 	if len(points) != 2 {
 		t.Fatalf("expected 2 points, got %d: %v", len(points), points)
@@ -43,7 +43,7 @@ func TestImageToPointsAllWhite(t *testing.T) {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
-	if points := imageToPoints(img, 128, 254.0); len(points) != 0 {
+	if points := imageToPoints(img, 128, 254.0, 254.0); len(points) != 0 {
 		t.Errorf("expected no points for an all-white image, got %v", points)
 	}
 }

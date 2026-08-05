@@ -27,9 +27,9 @@ var Model = resource.NewModel("esha", "portrait-drawing", "drawing")
 const (
 	// defaultImagePath is used when the image_path attribute is not set.
 	defaultImagePath = "image.png"
-	// squareSizeMM is the side length in millimeters of the square the image
-	// is mapped onto (254mm = 10in).
-	squareSizeMM = 254.0
+	// defaultSizeMM is the width and height in millimeters of the area the
+	// image is mapped onto when width_mm/height_mm are not set (254mm = 10in).
+	defaultSizeMM = 254.0
 	// defaultThreshold is the grayscale value (0-255) at or below which a pixel
 	// is considered dark enough to draw.
 	defaultThreshold = 128
@@ -46,26 +46,37 @@ type Config struct {
 	// ImagePath is the path to the PNG file to serve; defaults to "image.png"
 	// relative to the module's working directory.
 	ImagePath string `json:"image_path"`
-	// XMM and YMM are the position in millimeters of the top-left corner of
-	// the drawing square; the image's [x, y] coordinates (origin at the
-	// image's top-left) are offset by them. Required.
-	XMM *float64 `json:"x_mm"`
-	YMM *float64 `json:"y_mm"`
-	// ZMM is the z value in millimeters used for the poses returned by the
-	// draw command. Required.
-	ZMM *float64 `json:"z_mm"`
+	// TopLeftXMM and TopLeftYMM are the position in millimeters of the
+	// top-left corner of the drawing area; the image's [x, y] coordinates
+	// (origin at the image's top-left) are offset by them. Required.
+	TopLeftXMM *float64 `json:"top_left_x_mm"`
+	TopLeftYMM *float64 `json:"top_left_y_mm"`
+	// TopLeftZMM is the z value in millimeters used for the poses returned by
+	// the draw command. Required.
+	TopLeftZMM *float64 `json:"top_left_z_mm"`
+	// WidthMM and HeightMM are the size in millimeters of the drawing area the
+	// output poses cover; the image is scaled to fit inside it, preserving
+	// aspect ratio, and centered. Both default to 254mm (10in).
+	WidthMM  float64 `json:"width_mm"`
+	HeightMM float64 `json:"height_mm"`
 }
 
-// Validate ensures the config is valid; x_mm, y_mm, and z_mm are required.
+// Validate ensures the config is valid; the top_left attributes are required.
 func (c *Config) Validate(path string) ([]string, []string, error) {
-	if c.XMM == nil {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "x_mm")
+	if c.TopLeftXMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_x_mm")
 	}
-	if c.YMM == nil {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "y_mm")
+	if c.TopLeftYMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_y_mm")
 	}
-	if c.ZMM == nil {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "z_mm")
+	if c.TopLeftZMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_z_mm")
+	}
+	if c.WidthMM < 0 {
+		return nil, nil, fmt.Errorf("width_mm must be positive, got %v", c.WidthMM)
+	}
+	if c.HeightMM < 0 {
+		return nil, nil, fmt.Errorf("height_mm must be positive, got %v", c.HeightMM)
 	}
 	return nil, nil, nil
 }
@@ -80,6 +91,8 @@ type drawingCamera struct {
 	xMM       float64
 	yMM       float64
 	zMM       float64
+	widthMM   float64
+	heightMM  float64
 }
 
 func newDrawing(
@@ -96,13 +109,23 @@ func newDrawing(
 	if imagePath == "" {
 		imagePath = defaultImagePath
 	}
+	widthMM := cfg.WidthMM
+	if widthMM == 0 {
+		widthMM = defaultSizeMM
+	}
+	heightMM := cfg.HeightMM
+	if heightMM == 0 {
+		heightMM = defaultSizeMM
+	}
 	return &drawingCamera{
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		imagePath: imagePath,
-		xMM:       *cfg.XMM,
-		yMM:       *cfg.YMM,
-		zMM:       *cfg.ZMM,
+		xMM:       *cfg.TopLeftXMM,
+		yMM:       *cfg.TopLeftYMM,
+		zMM:       *cfg.TopLeftZMM,
+		widthMM:   widthMM,
+		heightMM:  heightMM,
 	}, nil
 }
 
@@ -145,12 +168,13 @@ func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interfa
 // DoCommand handles arbitrary commands. Supported commands:
 //
 //	{"command": "draw"} - reads the configured PNG file and returns the dark
-//	pixels as poses over a 254mm x 254mm square. Each pose has x and y in
-//	millimeters offset by the configured x_mm and y_mm attributes (the
-//	square's top-left corner), z set to the configured z_mm attribute, and an orientation
-//	vector pointing straight down (0, 0, -1) with theta 0, suitable for use as
-//	a motion service Move destination. An optional "threshold" (0-255, default
-//	128) sets the grayscale cutoff for which pixels are included.
+//	pixels as poses over a width_mm x height_mm drawing area. Each pose has x
+//	and y in millimeters offset by the configured top_left_x_mm and
+//	top_left_y_mm attributes (the area's top-left corner), z set to the
+//	configured top_left_z_mm attribute, and an orientation vector pointing
+//	straight down (0, 0, -1) with theta 0, suitable for use as a motion
+//	service Move destination. An optional "threshold" (0-255, default 128)
+//	sets the grayscale cutoff for which pixels are included.
 func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -178,8 +202,8 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 			return nil, fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
 		}
 
-		points := imageToPoints(img, threshold, squareSizeMM)
-		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm square", s.imagePath, len(points), squareSizeMM, squareSizeMM)
+		points := imageToPoints(img, threshold, s.widthMM, s.heightMM)
+		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area", s.imagePath, len(points), s.widthMM, s.heightMM)
 
 		poses := make([]interface{}, len(points))
 		for i, p := range points {
@@ -194,9 +218,10 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 			}
 		}
 		return map[string]interface{}{
-			"poses":   poses,
-			"count":   len(poses),
-			"size_mm": squareSizeMM,
+			"poses":     poses,
+			"count":     len(poses),
+			"width_mm":  s.widthMM,
+			"height_mm": s.heightMM,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
@@ -205,22 +230,21 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 
 // imageToPoints returns the coordinates (in millimeters) of every pixel whose
 // grayscale value is at or below threshold, scaled to fit within a
-// sizeMM x sizeMM square. Aspect ratio is preserved and the image is
-// centered in the square; the origin is the top-left corner.
-func imageToPoints(img image.Image, threshold uint8, sizeMM float64) [][2]float64 {
+// widthMM x heightMM area. Aspect ratio is preserved and the image is
+// centered in the area; the origin is the top-left corner.
+func imageToPoints(img image.Image, threshold uint8, widthMM, heightMM float64) [][2]float64 {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	if w == 0 || h == 0 {
 		return nil
 	}
 
-	longSide := w
-	if h > w {
-		longSide = h
+	mmPerPixel := widthMM / float64(w)
+	if perPixelY := heightMM / float64(h); perPixelY < mmPerPixel {
+		mmPerPixel = perPixelY
 	}
-	mmPerPixel := sizeMM / float64(longSide)
-	xOffset := (sizeMM - float64(w)*mmPerPixel) / 2
-	yOffset := (sizeMM - float64(h)*mmPerPixel) / 2
+	xOffset := (widthMM - float64(w)*mmPerPixel) / 2
+	yOffset := (heightMM - float64(h)*mmPerPixel) / 2
 
 	var points [][2]float64
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
