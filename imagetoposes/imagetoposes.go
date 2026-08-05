@@ -61,8 +61,15 @@ type Config struct {
 	TopLeftXMM *float64 `json:"top_left_x_mm"`
 	TopLeftYMM *float64 `json:"top_left_y_mm"`
 	// TopLeftZMM is the z value in millimeters used for the generated poses.
-	// Required.
+	// Exactly one of TopLeftZMM and PlanePoints is required.
 	TopLeftZMM *float64 `json:"top_left_z_mm"`
+	// PlanePoints are probed [x, y, z] touch points (in millimeters, world
+	// frame) on the drawing surface. At least 3 non-collinear points are
+	// required; with more than 3 the plane is least-squares fit. When set,
+	// each pose's z is evaluated from the fitted plane at its x/y instead of
+	// being constant, compensating for a tilted surface. Exactly one of
+	// TopLeftZMM and PlanePoints is required.
+	PlanePoints [][]float64 `json:"plane_points"`
 	// SizeXMM and SizeYMM are the extent in millimeters of the drawing area
 	// along the x and y axes; the image is scaled to fit inside it, preserving
 	// aspect ratio, and centered. Both default to 254mm (10in).
@@ -87,8 +94,21 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.TopLeftYMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_y_mm")
 	}
-	if c.TopLeftZMM == nil {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_z_mm")
+	if c.TopLeftZMM == nil && len(c.PlanePoints) == 0 {
+		return nil, nil, fmt.Errorf(`%s: exactly one of "top_left_z_mm" or "plane_points" is required`, path)
+	}
+	if c.TopLeftZMM != nil && len(c.PlanePoints) > 0 {
+		return nil, nil, fmt.Errorf(`%s: set only one of "top_left_z_mm" and "plane_points"`, path)
+	}
+	if len(c.PlanePoints) > 0 {
+		if len(c.PlanePoints) < 3 {
+			return nil, nil, fmt.Errorf("plane_points requires at least 3 points, got %d", len(c.PlanePoints))
+		}
+		for i, p := range c.PlanePoints {
+			if len(p) != 3 {
+				return nil, nil, fmt.Errorf("plane_points[%d] must be [x, y, z], got %v", i, p)
+			}
+		}
 	}
 	if c.SizeXMM < 0 {
 		return nil, nil, fmt.Errorf("size_x_mm must be positive, got %v", c.SizeXMM)
@@ -120,11 +140,13 @@ type imageToPosesCamera struct {
 	imagePath string
 	xMM       float64
 	yMM       float64
-	zMM       float64
 	sizeXMM   float64
 	sizeYMM   float64
 	spacingMM float64
 	hoverMM   float64
+	// surfaceZ returns the drawing surface's z at a world x/y: either the
+	// constant top_left_z_mm or the plane fit to plane_points.
+	surfaceZ func(x, y float64) float64
 
 	// mu guards cachedPoses and cachedSpacingMM, set by the generate command.
 	mu              sync.Mutex
@@ -154,17 +176,38 @@ func newImageToPoses(
 	if sizeYMM == 0 {
 		sizeYMM = defaultSizeMM
 	}
+
+	var surfaceZ func(x, y float64) float64
+	if len(cfg.PlanePoints) > 0 {
+		a, b, c, err := fitPlane(cfg.PlanePoints)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fit plane to plane_points: %w", err)
+		}
+		maxResidual := 0.0
+		for _, p := range cfg.PlanePoints {
+			if r := math.Abs(a*p[0] + b*p[1] + c - p[2]); r > maxResidual {
+				maxResidual = r
+			}
+		}
+		logger.Infof("fitted drawing plane z = %.6f*x + %.6f*y + %.3f from %d points (max residual %.3fmm)",
+			a, b, c, len(cfg.PlanePoints), maxResidual)
+		surfaceZ = func(x, y float64) float64 { return a*x + b*y + c }
+	} else {
+		z := *cfg.TopLeftZMM
+		surfaceZ = func(x, y float64) float64 { return z }
+	}
+
 	return &imageToPosesCamera{
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		imagePath: imagePath,
 		xMM:       *cfg.TopLeftXMM,
 		yMM:       *cfg.TopLeftYMM,
-		zMM:       *cfg.TopLeftZMM,
 		sizeXMM:   sizeXMM,
 		sizeYMM:   sizeYMM,
 		spacingMM: *cfg.PointSpacingMM,
 		hoverMM:   *cfg.HoverAboveMM,
+		surfaceZ:  surfaceZ,
 	}, nil
 }
 
@@ -184,13 +227,15 @@ func (s *imageToPosesCamera) Images(
 		return nil, resource.ResponseMetadata{}, errors.New("no image, call generate Do command")
 	}
 
-	points := make([][2]float64, 0, len(cached))
-	for _, pose := range cached {
-		pt := pose.Point()
-		if pt.Z != s.zMM {
-			// Skip hover poses; they duplicate a drawn point's x/y.
-			continue
-		}
+	// When hovering is enabled the cached sequence alternates touch, hover;
+	// skip the hover poses since they duplicate a drawn point's x/y.
+	step := 1
+	if s.hoverMM > 0 {
+		step = 2
+	}
+	points := make([][2]float64, 0, (len(cached)+step-1)/step)
+	for i := 0; i < len(cached); i += step {
+		pt := cached[i].Point()
 		points = append(points, [2]float64{pt.X - s.xMM, pt.Y - s.yMM})
 	}
 	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, spacingMM)
@@ -292,9 +337,10 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		poses := make([]spatialmath.Pose, 0, len(points)*2)
 		for _, p := range points {
 			x, y := s.xMM+p[0], s.yMM+p[1]
-			poses = append(poses, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: s.zMM}, downward))
+			z := s.surfaceZ(x, y)
+			poses = append(poses, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z}, downward))
 			if s.hoverMM > 0 {
-				poses = append(poses, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: s.zMM + s.hoverMM}, downward))
+				poses = append(poses, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward))
 			}
 		}
 
@@ -451,6 +497,43 @@ func nearestDark(dark []bool, cols, rows, fromCX, fromCY int) (int, int) {
 		}
 	}
 	return bestCX, bestCY
+}
+
+// fitPlane least-squares fits a plane z = a*x + b*y + c to the given
+// [x, y, z] points. With exactly 3 non-collinear points the fit is exact.
+// It errors if the points are collinear (or nearly so), since they then do
+// not determine a plane.
+func fitPlane(points [][]float64) (a, b, c float64, err error) {
+	// Solve the normal equations of minimizing sum((a*x + b*y + c - z)^2):
+	//   [sxx sxy sx] [a]   [sxz]
+	//   [sxy syy sy] [b] = [syz]
+	//   [sx  sy  n ] [c]   [sz ]
+	var sx, sy, sz, sxx, syy, sxy, sxz, syz float64
+	for _, p := range points {
+		x, y, z := p[0], p[1], p[2]
+		sx += x
+		sy += y
+		sz += z
+		sxx += x * x
+		syy += y * y
+		sxy += x * y
+		sxz += x * z
+		syz += y * z
+	}
+	n := float64(len(points))
+
+	det := sxx*(syy*n-sy*sy) - sxy*(sxy*n-sy*sx) + sx*(sxy*sy-syy*sx)
+	// Normalize the determinant by the matrix's scale so the collinearity
+	// check does not depend on the units of the inputs.
+	scale := math.Cbrt((sxx + 1) * (syy + 1) * n)
+	if math.Abs(det) < 1e-9*scale*scale*scale {
+		return 0, 0, 0, errors.New("points are collinear and do not determine a plane")
+	}
+
+	detA := sxz*(syy*n-sy*sy) - sxy*(syz*n-sy*sz) + sx*(syz*sy-syy*sz)
+	detB := sxx*(syz*n-sz*sy) - sxz*(sxy*n-sy*sx) + sx*(sxy*sz-syz*sx)
+	detC := sxx*(syy*sz-syz*sy) - sxy*(sxy*sz-syz*sx) + sxz*(sxy*sy-syy*sx)
+	return detA / det, detB / det, detC / det, nil
 }
 
 // renderPoints draws the given points as black dots on a white canvas
