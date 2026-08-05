@@ -1,0 +1,19 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "esha:portrait-drawing",
+  "visibility": "private",
+  "url": "",
+  "description": "A Viam module with a generic service that supports a draw DoCommand.",
+  "models": [
+    {
+      "api": "rdk:service:generic",
+      "model": "esha:portrait-drawing:drawing"
+    }
+  ],
+  "entrypoint": "bin/portrait-drawing",
+  "build": {
+    "build": "make module.tar.gz",
+    "path": "module.tar.gz",
+    "arch": ["linux/amd64", "linux/arm64", "darwin/arm64"]
+  }
+}
