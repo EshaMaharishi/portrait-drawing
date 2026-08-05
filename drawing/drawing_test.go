@@ -36,6 +36,40 @@ func TestImageToPoints(t *testing.T) {
 	}
 }
 
+func TestImageToPointsSnakeOrder(t *testing.T) {
+	// 4x3 image; row 1 is empty so it must not flip the sweep direction.
+	// Row 0: black at x=0 and x=2. Row 2: black at x=1 and x=3.
+	img := image.NewGray(image.Rect(0, 0, 4, 3))
+	for y := 0; y < 3; y++ {
+		for x := 0; x < 4; x++ {
+			img.SetGray(x, y, color.Gray{Y: 255})
+		}
+	}
+	img.SetGray(0, 0, color.Gray{Y: 0})
+	img.SetGray(2, 0, color.Gray{Y: 0})
+	img.SetGray(1, 2, color.Gray{Y: 0})
+	img.SetGray(3, 2, color.Gray{Y: 0})
+
+	points := imageToPoints(img, 128, 254.0, 254.0)
+
+	// 63.5mm per pixel; height is 3px = 190.5mm, so yOffset is 31.75mm.
+	// Row 0 sweeps left to right, row 2 sweeps right to left.
+	want := [][2]float64{
+		{31.75, 63.5},   // row 0, x=0
+		{158.75, 63.5},  // row 0, x=2
+		{222.25, 190.5}, // row 2, x=3 (reversed)
+		{95.25, 190.5},  // row 2, x=1
+	}
+	if len(points) != len(want) {
+		t.Fatalf("expected %d points, got %d: %v", len(want), len(points), points)
+	}
+	for i, p := range points {
+		if p != want[i] {
+			t.Errorf("point %d: got %v, want %v", i, p, want[i])
+		}
+	}
+}
+
 func TestImageToPointsAllWhite(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 3, 3))
 	for y := 0; y < 3; y++ {

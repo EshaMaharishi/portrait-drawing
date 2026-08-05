@@ -294,6 +294,10 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 // grayscale value is at or below threshold, scaled to fit within a
 // sizeXMM x sizeYMM area. Aspect ratio is preserved and the image is
 // centered in the area; the origin is the top-left corner.
+//
+// Points are ordered snake-style for the arm to sweep: rows go top to bottom,
+// with the first non-empty row left to right, the next non-empty row right to
+// left, and so on. Rows with no dark pixels do not flip the direction.
 func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM float64) [][2]float64 {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
@@ -309,7 +313,9 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM float64) [
 	yOffset := (sizeYMM - float64(h)*mmPerPixel) / 2
 
 	var points [][2]float64
+	leftToRight := true
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		rowStart := len(points)
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			gray := color.GrayModel.Convert(img.At(x, y)).(color.Gray)
 			if gray.Y <= threshold {
@@ -319,6 +325,16 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM float64) [
 				})
 			}
 		}
+		row := points[rowStart:]
+		if len(row) == 0 {
+			continue
+		}
+		if !leftToRight {
+			for i, j := 0, len(row)-1; i < j; i, j = i+1, j-1 {
+				row[i], row[j] = row[j], row[i]
+			}
+		}
+		leftToRight = !leftToRight
 	}
 	return points
 }
