@@ -39,9 +39,6 @@ const (
 	// defaultThreshold is the grayscale value (0-255) at or below which a pixel
 	// is considered dark enough to draw.
 	defaultThreshold = 128
-	// defaultPointSpacingMM is the grid spacing between generated points when
-	// point_spacing_mm is not set.
-	defaultPointSpacingMM = 1.0
 )
 
 func init() {
@@ -71,8 +68,8 @@ type Config struct {
 	// PointSpacingMM is the physical spacing in millimeters between generated
 	// points: the drawing area is divided into a grid of this cell size, and
 	// each cell whose average darkness passes the threshold becomes one pose.
-	// Defaults to 1mm; match it to the pen tip width.
-	PointSpacingMM float64 `json:"point_spacing_mm"`
+	// Match it to the pen tip width. Required.
+	PointSpacingMM *float64 `json:"point_spacing_mm"`
 	// Arm is the name of the arm the draw command moves through the cached
 	// poses, using the motion service. Required.
 	Arm string `json:"arm"`
@@ -95,8 +92,11 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.SizeYMM < 0 {
 		return nil, nil, fmt.Errorf("size_y_mm must be positive, got %v", c.SizeYMM)
 	}
-	if c.PointSpacingMM < 0 {
-		return nil, nil, fmt.Errorf("point_spacing_mm must be positive, got %v", c.PointSpacingMM)
+	if c.PointSpacingMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "point_spacing_mm")
+	}
+	if *c.PointSpacingMM <= 0 {
+		return nil, nil, fmt.Errorf("point_spacing_mm must be positive, got %v", *c.PointSpacingMM)
 	}
 	if c.Arm == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "arm")
@@ -149,10 +149,6 @@ func newDrawing(
 	if sizeYMM == 0 {
 		sizeYMM = defaultSizeMM
 	}
-	spacingMM := cfg.PointSpacingMM
-	if spacingMM == 0 {
-		spacingMM = defaultPointSpacingMM
-	}
 	motionSvc, err := motion.FromDependencies(deps, "builtin")
 	if err != nil {
 		return nil, err
@@ -166,7 +162,7 @@ func newDrawing(
 		zMM:       *cfg.TopLeftZMM,
 		sizeXMM:   sizeXMM,
 		sizeYMM:   sizeYMM,
-		spacingMM: spacingMM,
+		spacingMM: *cfg.PointSpacingMM,
 		armName:   cfg.Arm,
 		motion:    motionSvc,
 	}, nil
