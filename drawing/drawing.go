@@ -10,13 +10,18 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"sync"
 	"time"
+
+	"github.com/golang/geo/r3"
 
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
+	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
@@ -59,6 +64,9 @@ type Config struct {
 	// aspect ratio, and centered. Both default to 254mm (10in).
 	SizeXMM float64 `json:"size_x_mm"`
 	SizeYMM float64 `json:"size_y_mm"`
+	// Arm is the name of the arm the draw command moves through the cached
+	// poses, using the motion service. Required.
+	Arm string `json:"arm"`
 }
 
 // Validate ensures the config is valid; the top_left attributes are required.
@@ -78,7 +86,10 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.SizeYMM < 0 {
 		return nil, nil, fmt.Errorf("size_y_mm must be positive, got %v", c.SizeYMM)
 	}
-	return nil, nil, nil
+	if c.Arm == "" {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "arm")
+	}
+	return []string{c.Arm, motion.Named("builtin").String()}, nil, nil
 }
 
 type drawingCamera struct {
@@ -93,6 +104,12 @@ type drawingCamera struct {
 	zMM       float64
 	sizeXMM   float64
 	sizeYMM   float64
+	armName   string
+	motion    motion.Service
+
+	// mu guards cachedPoses, the poses from the last generate command.
+	mu          sync.Mutex
+	cachedPoses []spatialmath.Pose
 }
 
 func newDrawing(
@@ -117,6 +134,10 @@ func newDrawing(
 	if sizeYMM == 0 {
 		sizeYMM = defaultSizeMM
 	}
+	motionSvc, err := motion.FromDependencies(deps, "builtin")
+	if err != nil {
+		return nil, err
+	}
 	return &drawingCamera{
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
@@ -126,6 +147,8 @@ func newDrawing(
 		zMM:       *cfg.TopLeftZMM,
 		sizeXMM:   sizeXMM,
 		sizeYMM:   sizeYMM,
+		armName:   cfg.Arm,
+		motion:    motionSvc,
 	}, nil
 }
 
@@ -167,14 +190,17 @@ func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interfa
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
-//	{"command": "draw"} - reads the configured PNG file and returns the dark
-//	pixels as poses over a size_x_mm x size_y_mm drawing area. Each pose has x
-//	and y in millimeters offset by the configured top_left_x_mm and
+//	{"command": "generate"} - reads the configured PNG file and returns the
+//	dark pixels as poses over a size_x_mm x size_y_mm drawing area. Each pose
+//	has x and y in millimeters offset by the configured top_left_x_mm and
 //	top_left_y_mm attributes (the area's top-left corner), z set to the
 //	configured top_left_z_mm attribute, and an orientation vector pointing
 //	straight down (0, 0, -1) with theta 0, suitable for use as a motion
 //	service Move destination. An optional "threshold" (0-255, default 128)
-//	sets the grayscale cutoff for which pixels are included.
+//	sets the grayscale cutoff for which pixels are included. The generated
+//	poses are cached for the draw command.
+//	{"command": "draw"} - moves the configured arm through the poses cached
+//	by the last generate command, using the motion service.
 func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -182,7 +208,7 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 	}
 
 	switch command {
-	case "draw":
+	case "generate":
 		threshold := uint8(defaultThreshold)
 		if t, ok := cmd["threshold"].(float64); ok {
 			if t < 0 || t > 255 {
@@ -205,11 +231,15 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM)
 		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area", s.imagePath, len(points), s.sizeXMM, s.sizeYMM)
 
+		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
+		cached := make([]spatialmath.Pose, len(points))
 		poses := make([]interface{}, len(points))
 		for i, p := range points {
+			x, y := s.xMM+p[0], s.yMM+p[1]
+			cached[i] = spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: s.zMM}, downward)
 			poses[i] = map[string]interface{}{
-				"x":     s.xMM + p[0],
-				"y":     s.yMM + p[1],
+				"x":     x,
+				"y":     y,
 				"z":     s.zMM,
 				"o_x":   0.0,
 				"o_y":   0.0,
@@ -217,11 +247,43 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 				"theta": 0.0,
 			}
 		}
+
+		s.mu.Lock()
+		s.cachedPoses = cached
+		s.mu.Unlock()
+
 		return map[string]interface{}{
 			"poses":     poses,
 			"count":     len(poses),
 			"size_x_mm": s.sizeXMM,
 			"size_y_mm": s.sizeYMM,
+		}, nil
+	case "draw":
+		s.mu.Lock()
+		cached := s.cachedPoses
+		s.mu.Unlock()
+		if len(cached) == 0 {
+			return nil, errors.New(`no cached poses; run the "generate" command first`)
+		}
+
+		for i, pose := range cached {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("draw canceled after %d of %d poses: %w", i, len(cached), err)
+			}
+			if _, err := s.motion.Move(ctx, motion.MoveReq{
+				ComponentName: s.armName,
+				Destination:   referenceframe.NewPoseInFrame(referenceframe.World, pose),
+			}); err != nil {
+				return nil, fmt.Errorf("failed to move to pose %d of %d: %w", i+1, len(cached), err)
+			}
+			if (i+1)%100 == 0 {
+				s.logger.Infof("drew %d of %d poses", i+1, len(cached))
+			}
+		}
+
+		return map[string]interface{}{
+			"status": "drawing complete",
+			"count":  len(cached),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
