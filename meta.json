@@ -3,10 +3,10 @@
   "module_id": "esha:portrait-drawing",
   "visibility": "private",
   "url": "",
-  "description": "A Viam module with a generic service that supports a draw DoCommand.",
+  "description": "A Viam module with a camera component that serves image.png and supports a draw DoCommand.",
   "models": [
     {
-      "api": "rdk:service:generic",
+      "api": "rdk:component:camera",
       "model": "esha:portrait-drawing:drawing"
     }
   ],

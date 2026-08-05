@@ -1,38 +1,46 @@
-// Package drawing implements a generic service that supports a "draw" DoCommand.
+// Package drawing implements a camera component that serves image.png and
+// supports a "draw" DoCommand.
 package drawing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"os"
+	"time"
 
+	"go.viam.com/rdk/components/camera"
+	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/services/generic"
+	"go.viam.com/rdk/spatialmath"
+	rdkutils "go.viam.com/rdk/utils"
 )
 
-// Model is the full model triplet for this service.
+// Model is the full model triplet for this camera.
 var Model = resource.NewModel("esha", "portrait-drawing", "drawing")
 
 const (
 	imagePath = "image.png"
-	// squareSizeInches is the side length of the square the image is mapped onto.
-	squareSizeInches = 10.0
+	// squareSizeMM is the side length in millimeters of the square the image
+	// is mapped onto (254mm = 10in).
+	squareSizeMM = 254.0
 	// defaultThreshold is the grayscale value (0-255) at or below which a pixel
 	// is considered dark enough to draw.
 	defaultThreshold = 128
 )
 
 func init() {
-	resource.RegisterService(generic.API, Model, resource.Registration[resource.Resource, resource.NoNativeConfig]{
+	resource.RegisterComponent(camera.API, Model, resource.Registration[camera.Camera, resource.NoNativeConfig]{
 		Constructor: newDrawing,
 	})
 }
 
-type drawingService struct {
+type drawingCamera struct {
 	resource.Named
 	resource.AlwaysRebuild
 	resource.TriviallyCloseable
@@ -45,20 +53,56 @@ func newDrawing(
 	deps resource.Dependencies,
 	conf resource.Config,
 	logger logging.Logger,
-) (resource.Resource, error) {
-	return &drawingService{
+) (camera.Camera, error) {
+	return &drawingCamera{
 		Named:  conf.ResourceName().AsNamed(),
 		logger: logger,
 	}, nil
 }
 
+// Images returns image.png from the current directory as the camera image.
+func (s *drawingCamera) Images(
+	ctx context.Context,
+	filterSourceNames []string,
+	extra map[string]interface{},
+) ([]camera.NamedImage, resource.ResponseMetadata, error) {
+	imgBytes, err := os.ReadFile(imagePath)
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to read %s: %w", imagePath, err)
+	}
+	named, err := camera.NamedImageFromBytes(imgBytes, "image", rdkutils.MimeTypePNG, data.Annotations{})
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, err
+	}
+	return []camera.NamedImage{named}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
+}
+
+// NextPointCloud is unimplemented; this camera only serves 2D images.
+func (s *drawingCamera) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
+	return nil, errors.New("point clouds are not supported")
+}
+
+// Properties returns the intrinsic properties of this camera.
+func (s *drawingCamera) Properties(ctx context.Context) (camera.Properties, error) {
+	return camera.Properties{
+		SupportsPCD: false,
+		ImageType:   camera.ColorStream,
+		MimeTypes:   []string{rdkutils.MimeTypePNG},
+	}, nil
+}
+
+// Geometries returns no geometries; this camera has no physical footprint.
+func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
+	return nil, nil
+}
+
 // DoCommand handles arbitrary commands. Supported commands:
 //
 //	{"command": "draw"} - reads image.png from the current directory and returns
-//	the dark pixels as [x, y] coordinates (in inches) over a 10in x 10in square.
+//	the dark pixels as [x, y] coordinates (in millimeters) over a 254mm x 254mm square.
 //	An optional "threshold" (0-255, default 128) sets the grayscale cutoff for
 //	which pixels are included.
-func (s *drawingService) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
 		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
@@ -85,28 +129,28 @@ func (s *drawingService) DoCommand(ctx context.Context, cmd map[string]interface
 			return nil, fmt.Errorf("failed to decode %s as PNG: %w", imagePath, err)
 		}
 
-		points := imageToPoints(img, threshold, squareSizeInches)
-		s.logger.Infof("converted %s to %d points over a %.0fin x %.0fin square", imagePath, len(points), squareSizeInches, squareSizeInches)
+		points := imageToPoints(img, threshold, squareSizeMM)
+		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm square", imagePath, len(points), squareSizeMM, squareSizeMM)
 
 		coords := make([]interface{}, len(points))
 		for i, p := range points {
 			coords[i] = []interface{}{p[0], p[1]}
 		}
 		return map[string]interface{}{
-			"points":      coords,
-			"count":       len(points),
-			"size_inches": squareSizeInches,
+			"points":  coords,
+			"count":   len(points),
+			"size_mm": squareSizeMM,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
 }
 
-// imageToPoints returns the coordinates (in inches) of every pixel whose
+// imageToPoints returns the coordinates (in millimeters) of every pixel whose
 // grayscale value is at or below threshold, scaled to fit within a
-// sizeInches x sizeInches square. Aspect ratio is preserved and the image is
+// sizeMM x sizeMM square. Aspect ratio is preserved and the image is
 // centered in the square; the origin is the top-left corner.
-func imageToPoints(img image.Image, threshold uint8, sizeInches float64) [][2]float64 {
+func imageToPoints(img image.Image, threshold uint8, sizeMM float64) [][2]float64 {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	if w == 0 || h == 0 {
@@ -117,9 +161,9 @@ func imageToPoints(img image.Image, threshold uint8, sizeInches float64) [][2]fl
 	if h > w {
 		longSide = h
 	}
-	inchesPerPixel := sizeInches / float64(longSide)
-	xOffset := (sizeInches - float64(w)*inchesPerPixel) / 2
-	yOffset := (sizeInches - float64(h)*inchesPerPixel) / 2
+	mmPerPixel := sizeMM / float64(longSide)
+	xOffset := (sizeMM - float64(w)*mmPerPixel) / 2
+	yOffset := (sizeMM - float64(h)*mmPerPixel) / 2
 
 	var points [][2]float64
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -127,8 +171,8 @@ func imageToPoints(img image.Image, threshold uint8, sizeInches float64) [][2]fl
 			gray := color.GrayModel.Convert(img.At(x, y)).(color.Gray)
 			if gray.Y <= threshold {
 				points = append(points, [2]float64{
-					xOffset + (float64(x-bounds.Min.X)+0.5)*inchesPerPixel,
-					yOffset + (float64(y-bounds.Min.Y)+0.5)*inchesPerPixel,
+					xOffset + (float64(x-bounds.Min.X)+0.5)*mmPerPixel,
+					yOffset + (float64(y-bounds.Min.Y)+0.5)*mmPerPixel,
 				})
 			}
 		}
