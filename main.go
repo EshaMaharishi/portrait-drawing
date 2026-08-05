@@ -11,14 +11,14 @@ import (
 	"go.viam.com/rdk/services/worldstatestore"
 
 	"portrait-drawing/imagetoposes"
-	"portrait-drawing/poseexecutor"
-	"portrait-drawing/posestore"
+	"portrait-drawing/posesto3dscene"
+	"portrait-drawing/posestoarm"
 )
 
 func main() {
 	module.ModularMain(
 		resource.APIModel{API: camera.API, Model: imagetoposes.Model},
-		resource.APIModel{API: generic.API, Model: poseexecutor.Model},
-		resource.APIModel{API: worldstatestore.API, Model: posestore.Model},
+		resource.APIModel{API: generic.API, Model: posestoarm.Model},
+		resource.APIModel{API: worldstatestore.API, Model: posesto3dscene.Model},
 	)
 }

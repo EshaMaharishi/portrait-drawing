@@ -1,7 +1,7 @@
-// Package posestore implements a world state store service that exposes the
+// Package posesto3dscene implements a world state store service that exposes the
 // drawing camera's poses as transforms, so they can be viewed in the
 // visualizer on app.viam.com.
-package posestore
+package posesto3dscene
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 )
 
 // Model is the full model triplet for this service.
-var Model = resource.NewModel("esha", "portrait-drawing", "pose-store")
+var Model = resource.NewModel("esha", "portrait-drawing", "poses-to-3d-scene")
 
 const (
 	// defaultMaxPoses caps how many transforms are stored per draw so the
@@ -32,7 +32,7 @@ const (
 
 func init() {
 	resource.RegisterService(worldstatestore.API, Model, resource.Registration[worldstatestore.Service, *Config]{
-		Constructor: newPoseStore,
+		Constructor: newPosesTo3DScene,
 	})
 }
 
@@ -51,7 +51,7 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	return []string{c.Camera}, nil, nil
 }
 
-type poseStore struct {
+type posesTo3DScene struct {
 	resource.Named
 	resource.AlwaysRebuild
 
@@ -66,7 +66,7 @@ type poseStore struct {
 	cancel     context.CancelFunc
 }
 
-func newPoseStore(
+func newPosesTo3DScene(
 	ctx context.Context,
 	deps resource.Dependencies,
 	conf resource.Config,
@@ -81,7 +81,7 @@ func newPoseStore(
 		return nil, err
 	}
 	streamCtx, cancel := context.WithCancel(context.Background())
-	return &poseStore{
+	return &posesTo3DScene{
 		Named:      conf.ResourceName().AsNamed(),
 		logger:     logger,
 		cam:        cam,
@@ -93,7 +93,7 @@ func newPoseStore(
 }
 
 // ListUUIDs returns all transform UUIDs currently in the store.
-func (s *poseStore) ListUUIDs(ctx context.Context, extra map[string]any) ([][]byte, error) {
+func (s *posesTo3DScene) ListUUIDs(ctx context.Context, extra map[string]any) ([][]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -105,7 +105,7 @@ func (s *poseStore) ListUUIDs(ctx context.Context, extra map[string]any) ([][]by
 }
 
 // GetTransform returns the transform for the given UUID.
-func (s *poseStore) GetTransform(ctx context.Context, uuid []byte, extra map[string]any) (*commonpb.Transform, error) {
+func (s *posesTo3DScene) GetTransform(ctx context.Context, uuid []byte, extra map[string]any) (*commonpb.Transform, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -117,7 +117,7 @@ func (s *poseStore) GetTransform(ctx context.Context, uuid []byte, extra map[str
 }
 
 // StreamTransformChanges returns a stream of transform changes.
-func (s *poseStore) StreamTransformChanges(
+func (s *posesTo3DScene) StreamTransformChanges(
 	ctx context.Context,
 	extra map[string]any,
 ) (*worldstatestore.TransformChangeStream, error) {
@@ -131,7 +131,7 @@ func (s *poseStore) StreamTransformChanges(
 //	"threshold" is forwarded to the camera, and "max_poses" (default 2000)
 //	caps how many poses are stored, sampled evenly.
 //	{"command": "clear"} - removes all stored transforms.
-func (s *poseStore) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
 		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
@@ -212,7 +212,7 @@ func (s *poseStore) DoCommand(ctx context.Context, cmd map[string]interface{}) (
 }
 
 // Close stops the change stream.
-func (s *poseStore) Close(ctx context.Context) error {
+func (s *posesTo3DScene) Close(ctx context.Context) error {
 	s.cancel()
 	close(s.changeChan)
 	return nil
@@ -220,7 +220,7 @@ func (s *poseStore) Close(ctx context.Context) error {
 
 // replaceTransforms swaps the stored transforms for the given set, emitting
 // removals for the old transforms and additions for the new ones.
-func (s *poseStore) replaceTransforms(transforms map[string]*commonpb.Transform) {
+func (s *posesTo3DScene) replaceTransforms(transforms map[string]*commonpb.Transform) {
 	s.mu.Lock()
 	old := s.transforms
 	if transforms == nil {
@@ -237,7 +237,7 @@ func (s *poseStore) replaceTransforms(transforms map[string]*commonpb.Transform)
 	}
 }
 
-func (s *poseStore) emitChange(transform *commonpb.Transform, changeType pb.TransformChangeType) {
+func (s *posesTo3DScene) emitChange(transform *commonpb.Transform, changeType pb.TransformChangeType) {
 	change := worldstatestore.TransformChange{
 		ChangeType: changeType,
 		Transform:  transform,

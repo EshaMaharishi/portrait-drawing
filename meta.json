@@ -11,11 +11,11 @@
     },
     {
       "api": "rdk:service:generic",
-      "model": "esha:portrait-drawing:pose-executor"
+      "model": "esha:portrait-drawing:poses-to-arm"
     },
     {
       "api": "rdk:service:world_state_store",
-      "model": "esha:portrait-drawing:pose-store"
+      "model": "esha:portrait-drawing:poses-to-3d-scene"
     }
   ],
   "entrypoint": "bin/portrait-drawing",
