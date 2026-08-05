@@ -71,6 +71,26 @@ func TestImageToPointsSnakeOrder(t *testing.T) {
 	}
 }
 
+func TestRenderPoints(t *testing.T) {
+	// 100mm x 50mm area at 4px/mm gives a 400x200 canvas. One point at
+	// (25, 25) with 2mm spacing should paint a dot at pixel (100, 100).
+	img := renderPoints([][2]float64{{25, 25}}, 100, 50, 2)
+
+	bounds := img.Bounds()
+	if bounds.Dx() != 400 || bounds.Dy() != 200 {
+		t.Fatalf("expected 400x200 canvas, got %dx%d", bounds.Dx(), bounds.Dy())
+	}
+	if c := color.GrayModel.Convert(img.At(100, 100)).(color.Gray); c.Y != 0 {
+		t.Errorf("expected black at the point center, got gray %d", c.Y)
+	}
+	if c := color.GrayModel.Convert(img.At(0, 0)).(color.Gray); c.Y != 255 {
+		t.Errorf("expected white background at (0,0), got gray %d", c.Y)
+	}
+	if c := color.GrayModel.Convert(img.At(300, 100)).(color.Gray); c.Y != 255 {
+		t.Errorf("expected white far from the point, got gray %d", c.Y)
+	}
+}
+
 func TestImageToPointsAllWhite(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 3, 3))
 	for y := 0; y < 3; y++ {

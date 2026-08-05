@@ -3,6 +3,7 @@
 package drawing
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -39,6 +40,9 @@ const (
 	// defaultThreshold is the grayscale value (0-255) at or below which a pixel
 	// is considered dark enough to draw.
 	defaultThreshold = 128
+	// previewPxPerMM is the resolution of the preview image returned by
+	// Images, in pixels per millimeter of the drawing area.
+	previewPxPerMM = 4.0
 )
 
 func init() {
@@ -168,21 +172,93 @@ func newDrawing(
 	}, nil
 }
 
-// Images returns the configured PNG file as the camera image.
+// Images returns a preview of the generated XY points: one black dot per
+// point on a white canvas the size of the drawing area. It renders the poses
+// cached by the last generate command, or, when nothing is cached yet, the
+// points the configured image and attributes would generate.
 func (s *drawingCamera) Images(
 	ctx context.Context,
 	filterSourceNames []string,
 	extra map[string]interface{},
 ) ([]camera.NamedImage, resource.ResponseMetadata, error) {
-	imgBytes, err := os.ReadFile(s.imagePath)
+	points, err := s.currentPoints()
 	if err != nil {
-		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to read %s: %w", s.imagePath, err)
+		return nil, resource.ResponseMetadata{}, err
 	}
-	named, err := camera.NamedImageFromBytes(imgBytes, "image", rdkutils.MimeTypePNG, data.Annotations{})
+	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, s.spacingMM)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, preview); err != nil {
+		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to encode preview image: %w", err)
+	}
+	named, err := camera.NamedImageFromBytes(buf.Bytes(), "points", rdkutils.MimeTypePNG, data.Annotations{})
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
 	return []camera.NamedImage{named}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
+}
+
+// currentPoints returns the drawing-area-relative [x, y] points that draw
+// would move through: the cached poses from the last generate command if
+// present (with the top_left offsets removed), otherwise the points freshly
+// generated from the configured image with the default threshold.
+func (s *drawingCamera) currentPoints() ([][2]float64, error) {
+	s.mu.Lock()
+	cached := s.cachedPoses
+	s.mu.Unlock()
+	if len(cached) > 0 {
+		points := make([][2]float64, len(cached))
+		for i, pose := range cached {
+			pt := pose.Point()
+			points[i] = [2]float64{pt.X - s.xMM, pt.Y - s.yMM}
+		}
+		return points, nil
+	}
+
+	f, err := os.Open(s.imagePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", s.imagePath, err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
+	}
+	return imageToPoints(img, defaultThreshold, s.sizeXMM, s.sizeYMM, s.spacingMM), nil
+}
+
+// renderPoints draws the given points as black dots on a white canvas
+// spanning sizeXMM x sizeYMM, at previewPxPerMM resolution. Each dot's
+// radius is half the point spacing, matching the coverage of a pen tip of
+// that width.
+func renderPoints(points [][2]float64, sizeXMM, sizeYMM, spacingMM float64) image.Image {
+	w := int(math.Ceil(sizeXMM * previewPxPerMM))
+	h := int(math.Ceil(sizeYMM * previewPxPerMM))
+	canvas := image.NewGray(image.Rect(0, 0, w, h))
+	for i := range canvas.Pix {
+		canvas.Pix[i] = 255
+	}
+
+	radius := spacingMM * previewPxPerMM / 2
+	if radius < 1 {
+		radius = 1
+	}
+	r := int(math.Ceil(radius))
+	for _, p := range points {
+		cx, cy := p[0]*previewPxPerMM, p[1]*previewPxPerMM
+		for dy := -r; dy <= r; dy++ {
+			for dx := -r; dx <= r; dx++ {
+				x, y := int(cx)+dx, int(cy)+dy
+				if x < 0 || x >= w || y < 0 || y >= h {
+					continue
+				}
+				fx, fy := float64(x)+0.5-cx, float64(y)+0.5-cy
+				if fx*fx+fy*fy <= radius*radius {
+					canvas.SetGray(x, y, color.Gray{Y: 0})
+				}
+			}
+		}
+	}
+	return canvas
 }
 
 // NextPointCloud is unimplemented; this camera only serves 2D images.
