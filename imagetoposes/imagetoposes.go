@@ -1,6 +1,7 @@
-// Package drawing implements a camera component that serves image.png and
-// supports a "draw" DoCommand.
-package drawing
+// Package imagetoposes implements a camera component that converts an image
+// into drawable poses via its generate DoCommand and serves a preview of the
+// generated points as its camera image.
+package imagetoposes
 
 import (
 	"bytes"
@@ -21,21 +22,19 @@ import (
 	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
-	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
 // Model is the full model triplet for this camera.
-var Model = resource.NewModel("esha", "portrait-drawing", "drawing")
+var Model = resource.NewModel("esha", "portrait-drawing", "image-to-poses")
 
 const (
 	// defaultImagePath is used when the image_path attribute is not set.
 	defaultImagePath = "image.png"
 	// defaultSizeMM is the width and height in millimeters of the area the
-	// image is mapped onto when width_mm/height_mm are not set (254mm = 10in).
+	// image is mapped onto when size_x_mm/size_y_mm are not set (254mm = 10in).
 	defaultSizeMM = 254.0
 	// defaultThreshold is the grayscale value (0-255) at or below which a pixel
 	// is considered dark enough to draw.
@@ -47,22 +46,22 @@ const (
 
 func init() {
 	resource.RegisterComponent(camera.API, Model, resource.Registration[camera.Camera, *Config]{
-		Constructor: newDrawing,
+		Constructor: newImageToPoses,
 	})
 }
 
 // Config describes the attributes for this camera.
 type Config struct {
-	// ImagePath is the path to the PNG file to serve; defaults to "image.png"
-	// relative to the module's working directory.
+	// ImagePath is the path to the PNG file to convert; defaults to
+	// "image.png" relative to the module's working directory.
 	ImagePath string `json:"image_path"`
 	// TopLeftXMM and TopLeftYMM are the position in millimeters of the
 	// top-left corner of the drawing area; the image's [x, y] coordinates
 	// (origin at the image's top-left) are offset by them. Required.
 	TopLeftXMM *float64 `json:"top_left_x_mm"`
 	TopLeftYMM *float64 `json:"top_left_y_mm"`
-	// TopLeftZMM is the z value in millimeters used for the poses returned by
-	// the draw command. Required.
+	// TopLeftZMM is the z value in millimeters used for the generated poses.
+	// Required.
 	TopLeftZMM *float64 `json:"top_left_z_mm"`
 	// SizeXMM and SizeYMM are the extent in millimeters of the drawing area
 	// along the x and y axes; the image is scaled to fit inside it, preserving
@@ -74,12 +73,9 @@ type Config struct {
 	// each cell whose average darkness passes the threshold becomes one pose.
 	// Match it to the pen tip width. Required.
 	PointSpacingMM *float64 `json:"point_spacing_mm"`
-	// Arm is the name of the arm the draw command moves through the cached
-	// poses, using the motion service. Required.
-	Arm string `json:"arm"`
 }
 
-// Validate ensures the config is valid; the top_left attributes are required.
+// Validate ensures the config is valid.
 func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.TopLeftXMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_x_mm")
@@ -102,13 +98,10 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if *c.PointSpacingMM <= 0 {
 		return nil, nil, fmt.Errorf("point_spacing_mm must be positive, got %v", *c.PointSpacingMM)
 	}
-	if c.Arm == "" {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "arm")
-	}
-	return []string{c.Arm, motion.Named("builtin").String()}, nil, nil
+	return nil, nil, nil
 }
 
-type drawingCamera struct {
+type imageToPosesCamera struct {
 	resource.Named
 	resource.AlwaysRebuild
 	resource.TriviallyCloseable
@@ -121,17 +114,14 @@ type drawingCamera struct {
 	sizeXMM   float64
 	sizeYMM   float64
 	spacingMM float64
-	armName   string
-	motion    motion.Service
 
-	// mu guards cachedPoses, the poses from the last generate command, and
-	// drawCancel, which is non-nil while a draw is in progress and cancels it.
-	mu          sync.Mutex
-	cachedPoses []spatialmath.Pose
-	drawCancel  context.CancelFunc
+	// mu guards cachedPoses and cachedSpacingMM, set by the generate command.
+	mu              sync.Mutex
+	cachedPoses     []spatialmath.Pose
+	cachedSpacingMM float64
 }
 
-func newDrawing(
+func newImageToPoses(
 	ctx context.Context,
 	deps resource.Dependencies,
 	conf resource.Config,
@@ -153,11 +143,7 @@ func newDrawing(
 	if sizeYMM == 0 {
 		sizeYMM = defaultSizeMM
 	}
-	motionSvc, err := motion.FromDependencies(deps, "builtin")
-	if err != nil {
-		return nil, err
-	}
-	return &drawingCamera{
+	return &imageToPosesCamera{
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		imagePath: imagePath,
@@ -167,25 +153,31 @@ func newDrawing(
 		sizeXMM:   sizeXMM,
 		sizeYMM:   sizeYMM,
 		spacingMM: *cfg.PointSpacingMM,
-		armName:   cfg.Arm,
-		motion:    motionSvc,
 	}, nil
 }
 
 // Images returns a preview of the generated XY points: one black dot per
-// point on a white canvas the size of the drawing area. It renders the poses
-// cached by the last generate command, or, when nothing is cached yet, the
-// points the configured image and attributes would generate.
-func (s *drawingCamera) Images(
+// point on a white canvas the size of the drawing area. It errors until the
+// generate command has cached a set of poses.
+func (s *imageToPosesCamera) Images(
 	ctx context.Context,
 	filterSourceNames []string,
 	extra map[string]interface{},
 ) ([]camera.NamedImage, resource.ResponseMetadata, error) {
-	points, err := s.currentPoints()
-	if err != nil {
-		return nil, resource.ResponseMetadata{}, err
+	s.mu.Lock()
+	cached := s.cachedPoses
+	spacingMM := s.cachedSpacingMM
+	s.mu.Unlock()
+	if len(cached) == 0 {
+		return nil, resource.ResponseMetadata{}, errors.New("no image, call generate Do command")
 	}
-	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, s.spacingMM)
+
+	points := make([][2]float64, len(cached))
+	for i, pose := range cached {
+		pt := pose.Point()
+		points[i] = [2]float64{pt.X - s.xMM, pt.Y - s.yMM}
+	}
+	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, spacingMM)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, preview); err != nil {
 		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to encode preview image: %w", err)
@@ -197,77 +189,13 @@ func (s *drawingCamera) Images(
 	return []camera.NamedImage{named}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
 }
 
-// currentPoints returns the drawing-area-relative [x, y] points that draw
-// would move through: the cached poses from the last generate command if
-// present (with the top_left offsets removed), otherwise the points freshly
-// generated from the configured image with the default threshold.
-func (s *drawingCamera) currentPoints() ([][2]float64, error) {
-	s.mu.Lock()
-	cached := s.cachedPoses
-	s.mu.Unlock()
-	if len(cached) > 0 {
-		points := make([][2]float64, len(cached))
-		for i, pose := range cached {
-			pt := pose.Point()
-			points[i] = [2]float64{pt.X - s.xMM, pt.Y - s.yMM}
-		}
-		return points, nil
-	}
-
-	f, err := os.Open(s.imagePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open %s: %w", s.imagePath, err)
-	}
-	defer f.Close()
-	img, err := png.Decode(f)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
-	}
-	return imageToPoints(img, defaultThreshold, s.sizeXMM, s.sizeYMM, s.spacingMM), nil
-}
-
-// renderPoints draws the given points as black dots on a white canvas
-// spanning sizeXMM x sizeYMM, at previewPxPerMM resolution. Each dot's
-// radius is half the point spacing, matching the coverage of a pen tip of
-// that width.
-func renderPoints(points [][2]float64, sizeXMM, sizeYMM, spacingMM float64) image.Image {
-	w := int(math.Ceil(sizeXMM * previewPxPerMM))
-	h := int(math.Ceil(sizeYMM * previewPxPerMM))
-	canvas := image.NewGray(image.Rect(0, 0, w, h))
-	for i := range canvas.Pix {
-		canvas.Pix[i] = 255
-	}
-
-	radius := spacingMM * previewPxPerMM / 2
-	if radius < 1 {
-		radius = 1
-	}
-	r := int(math.Ceil(radius))
-	for _, p := range points {
-		cx, cy := p[0]*previewPxPerMM, p[1]*previewPxPerMM
-		for dy := -r; dy <= r; dy++ {
-			for dx := -r; dx <= r; dx++ {
-				x, y := int(cx)+dx, int(cy)+dy
-				if x < 0 || x >= w || y < 0 || y >= h {
-					continue
-				}
-				fx, fy := float64(x)+0.5-cx, float64(y)+0.5-cy
-				if fx*fx+fy*fy <= radius*radius {
-					canvas.SetGray(x, y, color.Gray{Y: 0})
-				}
-			}
-		}
-	}
-	return canvas
-}
-
 // NextPointCloud is unimplemented; this camera only serves 2D images.
-func (s *drawingCamera) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
+func (s *imageToPosesCamera) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
 	return nil, errors.New("point clouds are not supported")
 }
 
 // Properties returns the intrinsic properties of this camera.
-func (s *drawingCamera) Properties(ctx context.Context) (camera.Properties, error) {
+func (s *imageToPosesCamera) Properties(ctx context.Context) (camera.Properties, error) {
 	return camera.Properties{
 		SupportsPCD: false,
 		ImageType:   camera.ColorStream,
@@ -276,28 +204,24 @@ func (s *drawingCamera) Properties(ctx context.Context) (camera.Properties, erro
 }
 
 // Geometries returns no geometries; this camera has no physical footprint.
-func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
+func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
 	return nil, nil
 }
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
 //	{"command": "generate"} - reads the configured PNG file and returns the
-//	dark pixels as poses over a size_x_mm x size_y_mm drawing area. Each pose
-//	has x and y in millimeters offset by the configured top_left_x_mm and
-//	top_left_y_mm attributes (the area's top-left corner), z set to the
+//	dark cells of a point_spacing_mm grid as poses over a size_x_mm x
+//	size_y_mm drawing area, caching them for the pose executor and the
+//	preview image. Once a set of poses is cached, generate returns it without
+//	recomputing, unless "threshold" (0-255, default 128) or
+//	"point_spacing_mm" overrides are passed, which force a regeneration. Each
+//	pose has x and y in millimeters offset by the configured top_left_x_mm
+//	and top_left_y_mm attributes (the area's top-left corner), z set to the
 //	configured top_left_z_mm attribute, and an orientation vector pointing
 //	straight down (0, 0, -1) with theta 0, suitable for use as a motion
-//	service Move destination. Points are laid out on a grid of
-//	point_spacing_mm cells; a cell becomes a point when its average grayscale
-//	value is at or below the threshold. Optional "threshold" (0-255, default
-//	128) and "point_spacing_mm" override the defaults for this call. The
-//	generated poses are cached for the draw command.
-//	{"command": "draw"} - moves the configured arm through the poses cached
-//	by the last generate command, using the motion service. Only one draw may
-//	run at a time.
-//	{"command": "stop"} - cancels the in-progress draw, if any.
-func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+//	service Move destination.
+func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
 		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
@@ -306,11 +230,13 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 	switch command {
 	case "generate":
 		threshold := uint8(defaultThreshold)
+		overridden := false
 		if t, ok := cmd["threshold"].(float64); ok {
 			if t < 0 || t > 255 {
 				return nil, fmt.Errorf("threshold must be between 0 and 255, got %v", t)
 			}
 			threshold = uint8(t)
+			overridden = true
 		}
 		spacingMM := s.spacingMM
 		if sp, ok := cmd["point_spacing_mm"].(float64); ok {
@@ -318,6 +244,15 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 				return nil, fmt.Errorf("point_spacing_mm must be positive, got %v", sp)
 			}
 			spacingMM = sp
+			overridden = true
+		}
+
+		s.mu.Lock()
+		cached := s.cachedPoses
+		cachedSpacingMM := s.cachedSpacingMM
+		s.mu.Unlock()
+		if len(cached) > 0 && !overridden {
+			return s.posesResponse(cached, cachedSpacingMM), nil
 		}
 
 		f, err := os.Open(s.imagePath)
@@ -336,98 +271,43 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 			s.imagePath, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
-		cached := make([]spatialmath.Pose, len(points))
-		poses := make([]interface{}, len(points))
+		poses := make([]spatialmath.Pose, len(points))
 		for i, p := range points {
-			x, y := s.xMM+p[0], s.yMM+p[1]
-			cached[i] = spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: s.zMM}, downward)
-			poses[i] = map[string]interface{}{
-				"x":     x,
-				"y":     y,
-				"z":     s.zMM,
-				"o_x":   0.0,
-				"o_y":   0.0,
-				"o_z":   -1.0,
-				"theta": 0.0,
-			}
+			poses[i] = spatialmath.NewPose(r3.Vector{X: s.xMM + p[0], Y: s.yMM + p[1], Z: s.zMM}, downward)
 		}
 
 		s.mu.Lock()
-		s.cachedPoses = cached
+		s.cachedPoses = poses
+		s.cachedSpacingMM = spacingMM
 		s.mu.Unlock()
 
-		return map[string]interface{}{
-			"poses":            poses,
-			"count":            len(poses),
-			"size_x_mm":        s.sizeXMM,
-			"size_y_mm":        s.sizeYMM,
-			"point_spacing_mm": spacingMM,
-		}, nil
-	case "draw":
-		s.mu.Lock()
-		cached := s.cachedPoses
-		if len(cached) == 0 {
-			s.mu.Unlock()
-			return nil, errors.New(`no cached poses; run the "generate" command first`)
-		}
-		if s.drawCancel != nil {
-			s.mu.Unlock()
-			return nil, errors.New(`a draw is already in progress; send the "stop" command to cancel it`)
-		}
-		drawCtx, cancel := context.WithCancel(ctx)
-		s.drawCancel = cancel
-		s.mu.Unlock()
-		defer func() {
-			s.mu.Lock()
-			s.drawCancel = nil
-			s.mu.Unlock()
-			cancel()
-		}()
-
-		for i, pose := range cached {
-			if drawCtx.Err() != nil {
-				s.logger.Infof("draw stopped after %d of %d poses", i, len(cached))
-				return map[string]interface{}{
-					"status":    "stopped",
-					"completed": i,
-					"total":     len(cached),
-				}, nil
-			}
-			if _, err := s.motion.Move(drawCtx, motion.MoveReq{
-				ComponentName: s.armName,
-				Destination:   referenceframe.NewPoseInFrame(referenceframe.World, pose),
-			}); err != nil {
-				if drawCtx.Err() != nil {
-					s.logger.Infof("draw stopped after %d of %d poses", i, len(cached))
-					return map[string]interface{}{
-						"status":    "stopped",
-						"completed": i,
-						"total":     len(cached),
-					}, nil
-				}
-				return nil, fmt.Errorf("failed to move to pose %d of %d: %w", i+1, len(cached), err)
-			}
-			if (i+1)%100 == 0 {
-				s.logger.Infof("drew %d of %d poses", i+1, len(cached))
-			}
-		}
-
-		return map[string]interface{}{
-			"status":    "drawing complete",
-			"completed": len(cached),
-			"total":     len(cached),
-		}, nil
-	case "stop":
-		s.mu.Lock()
-		cancel := s.drawCancel
-		s.mu.Unlock()
-		if cancel == nil {
-			return map[string]interface{}{"status": "no draw in progress"}, nil
-		}
-		cancel()
-		return map[string]interface{}{"status": "stop requested"}, nil
+		return s.posesResponse(poses, spacingMM), nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
+	}
+}
+
+// posesResponse builds the generate response for a set of poses.
+func (s *imageToPosesCamera) posesResponse(poses []spatialmath.Pose, spacingMM float64) map[string]interface{} {
+	out := make([]interface{}, len(poses))
+	for i, pose := range poses {
+		pt := pose.Point()
+		out[i] = map[string]interface{}{
+			"x":     pt.X,
+			"y":     pt.Y,
+			"z":     pt.Z,
+			"o_x":   0.0,
+			"o_y":   0.0,
+			"o_z":   -1.0,
+			"theta": 0.0,
+		}
+	}
+	return map[string]interface{}{
+		"poses":            out,
+		"count":            len(out),
+		"size_x_mm":        s.sizeXMM,
+		"size_y_mm":        s.sizeYMM,
+		"point_spacing_mm": spacingMM,
 	}
 }
 
@@ -501,4 +381,39 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 		leftToRight = !leftToRight
 	}
 	return points
+}
+
+// renderPoints draws the given points as black dots on a white canvas
+// spanning sizeXMM x sizeYMM, at previewPxPerMM resolution. Each dot's
+// radius is half the point spacing, matching the coverage of a pen tip of
+// that width.
+func renderPoints(points [][2]float64, sizeXMM, sizeYMM, spacingMM float64) image.Image {
+	w := int(math.Ceil(sizeXMM * previewPxPerMM))
+	h := int(math.Ceil(sizeYMM * previewPxPerMM))
+	canvas := image.NewGray(image.Rect(0, 0, w, h))
+	for i := range canvas.Pix {
+		canvas.Pix[i] = 255
+	}
+
+	radius := spacingMM * previewPxPerMM / 2
+	if radius < 1 {
+		radius = 1
+	}
+	r := int(math.Ceil(radius))
+	for _, p := range points {
+		cx, cy := p[0]*previewPxPerMM, p[1]*previewPxPerMM
+		for dy := -r; dy <= r; dy++ {
+			for dx := -r; dx <= r; dx++ {
+				x, y := int(cx)+dx, int(cy)+dy
+				if x < 0 || x >= w || y < 0 || y >= h {
+					continue
+				}
+				fx, fy := float64(x)+0.5-cx, float64(y)+0.5-cy
+				if fx*fx+fy*fy <= radius*radius {
+					canvas.SetGray(x, y, color.Gray{Y: 0})
+				}
+			}
+		}
+	}
+	return canvas
 }

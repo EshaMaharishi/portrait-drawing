@@ -3,11 +3,15 @@
   "module_id": "esha:portrait-drawing",
   "visibility": "private",
   "url": "",
-  "description": "A Viam module with a camera component that serves image.png and supports a draw DoCommand.",
+  "description": "A Viam module for drawing an image with an arm: converts an image into poses, moves an arm through them, and shows them in the visualizer.",
   "models": [
     {
       "api": "rdk:component:camera",
-      "model": "esha:portrait-drawing:drawing"
+      "model": "esha:portrait-drawing:image-to-poses"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "esha:portrait-drawing:pose-executor"
     },
     {
       "api": "rdk:service:world_state_store",
