@@ -17,7 +17,8 @@ func TestImageToPoints(t *testing.T) {
 	img.SetGray(0, 0, color.Gray{Y: 0})
 	img.SetGray(3, 1, color.Gray{Y: 0})
 
-	points := imageToPoints(img, 128, 254.0, 254.0)
+	// 63.5mm spacing matches the pixel size, so cells map 1:1 to pixels.
+	points := imageToPoints(img, 128, 254.0, 254.0, 63.5)
 
 	if len(points) != 2 {
 		t.Fatalf("expected 2 points, got %d: %v", len(points), points)
@@ -50,7 +51,7 @@ func TestImageToPointsSnakeOrder(t *testing.T) {
 	img.SetGray(1, 2, color.Gray{Y: 0})
 	img.SetGray(3, 2, color.Gray{Y: 0})
 
-	points := imageToPoints(img, 128, 254.0, 254.0)
+	points := imageToPoints(img, 128, 254.0, 254.0, 63.5)
 
 	// 63.5mm per pixel; height is 3px = 190.5mm, so yOffset is 31.75mm.
 	// Row 0 sweeps left to right, row 2 sweeps right to left.
@@ -77,7 +78,30 @@ func TestImageToPointsAllWhite(t *testing.T) {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
-	if points := imageToPoints(img, 128, 254.0, 254.0); len(points) != 0 {
+	if points := imageToPoints(img, 128, 254.0, 254.0, 63.5); len(points) != 0 {
 		t.Errorf("expected no points for an all-white image, got %v", points)
+	}
+}
+
+func TestImageToPointsDownsamples(t *testing.T) {
+	// 4x2 image with 127mm spacing: the grid is 2x1 cells of 2x2 pixels each.
+	// Left cell has two black pixels (average 127.5 <= 128, kept); right cell
+	// is all white (dropped).
+	img := image.NewGray(image.Rect(0, 0, 4, 2))
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 4; x++ {
+			img.SetGray(x, y, color.Gray{Y: 255})
+		}
+	}
+	img.SetGray(0, 0, color.Gray{Y: 0})
+	img.SetGray(1, 0, color.Gray{Y: 0})
+
+	points := imageToPoints(img, 128, 254.0, 254.0, 127.0)
+
+	// The image spans 254mm x 127mm, so yOffset is 63.5mm. The kept cell's
+	// center is at (0.5*127, 63.5 + 0.5*127).
+	want := [2]float64{63.5, 127.0}
+	if len(points) != 1 || points[0] != want {
+		t.Fatalf("expected exactly [%v], got %v", want, points)
 	}
 }

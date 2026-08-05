@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -38,6 +39,9 @@ const (
 	// defaultThreshold is the grayscale value (0-255) at or below which a pixel
 	// is considered dark enough to draw.
 	defaultThreshold = 128
+	// defaultPointSpacingMM is the grid spacing between generated points when
+	// point_spacing_mm is not set.
+	defaultPointSpacingMM = 1.0
 )
 
 func init() {
@@ -64,6 +68,11 @@ type Config struct {
 	// aspect ratio, and centered. Both default to 254mm (10in).
 	SizeXMM float64 `json:"size_x_mm"`
 	SizeYMM float64 `json:"size_y_mm"`
+	// PointSpacingMM is the physical spacing in millimeters between generated
+	// points: the drawing area is divided into a grid of this cell size, and
+	// each cell whose average darkness passes the threshold becomes one pose.
+	// Defaults to 1mm; match it to the pen tip width.
+	PointSpacingMM float64 `json:"point_spacing_mm"`
 	// Arm is the name of the arm the draw command moves through the cached
 	// poses, using the motion service. Required.
 	Arm string `json:"arm"`
@@ -86,6 +95,9 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.SizeYMM < 0 {
 		return nil, nil, fmt.Errorf("size_y_mm must be positive, got %v", c.SizeYMM)
 	}
+	if c.PointSpacingMM < 0 {
+		return nil, nil, fmt.Errorf("point_spacing_mm must be positive, got %v", c.PointSpacingMM)
+	}
 	if c.Arm == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "arm")
 	}
@@ -104,6 +116,7 @@ type drawingCamera struct {
 	zMM       float64
 	sizeXMM   float64
 	sizeYMM   float64
+	spacingMM float64
 	armName   string
 	motion    motion.Service
 
@@ -136,6 +149,10 @@ func newDrawing(
 	if sizeYMM == 0 {
 		sizeYMM = defaultSizeMM
 	}
+	spacingMM := cfg.PointSpacingMM
+	if spacingMM == 0 {
+		spacingMM = defaultPointSpacingMM
+	}
 	motionSvc, err := motion.FromDependencies(deps, "builtin")
 	if err != nil {
 		return nil, err
@@ -149,6 +166,7 @@ func newDrawing(
 		zMM:       *cfg.TopLeftZMM,
 		sizeXMM:   sizeXMM,
 		sizeYMM:   sizeYMM,
+		spacingMM: spacingMM,
 		armName:   cfg.Arm,
 		motion:    motionSvc,
 	}, nil
@@ -198,9 +216,11 @@ func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interfa
 //	top_left_y_mm attributes (the area's top-left corner), z set to the
 //	configured top_left_z_mm attribute, and an orientation vector pointing
 //	straight down (0, 0, -1) with theta 0, suitable for use as a motion
-//	service Move destination. An optional "threshold" (0-255, default 128)
-//	sets the grayscale cutoff for which pixels are included. The generated
-//	poses are cached for the draw command.
+//	service Move destination. Points are laid out on a grid of
+//	point_spacing_mm cells; a cell becomes a point when its average grayscale
+//	value is at or below the threshold. Optional "threshold" (0-255, default
+//	128) and "point_spacing_mm" override the defaults for this call. The
+//	generated poses are cached for the draw command.
 //	{"command": "draw"} - moves the configured arm through the poses cached
 //	by the last generate command, using the motion service. Only one draw may
 //	run at a time.
@@ -220,6 +240,13 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 			}
 			threshold = uint8(t)
 		}
+		spacingMM := s.spacingMM
+		if sp, ok := cmd["point_spacing_mm"].(float64); ok {
+			if sp <= 0 {
+				return nil, fmt.Errorf("point_spacing_mm must be positive, got %v", sp)
+			}
+			spacingMM = sp
+		}
 
 		f, err := os.Open(s.imagePath)
 		if err != nil {
@@ -232,8 +259,9 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 			return nil, fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
 		}
 
-		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM)
-		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area", s.imagePath, len(points), s.sizeXMM, s.sizeYMM)
+		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM)
+		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area at %.1fmm spacing",
+			s.imagePath, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
 		cached := make([]spatialmath.Pose, len(points))
@@ -257,10 +285,11 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 		s.mu.Unlock()
 
 		return map[string]interface{}{
-			"poses":     poses,
-			"count":     len(poses),
-			"size_x_mm": s.sizeXMM,
-			"size_y_mm": s.sizeYMM,
+			"poses":            poses,
+			"count":            len(poses),
+			"size_x_mm":        s.sizeXMM,
+			"size_y_mm":        s.sizeYMM,
+			"point_spacing_mm": spacingMM,
 		}, nil
 	case "draw":
 		s.mu.Lock()
@@ -330,15 +359,17 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 	}
 }
 
-// imageToPoints returns the coordinates (in millimeters) of every pixel whose
-// grayscale value is at or below threshold, scaled to fit within a
-// sizeXMM x sizeYMM area. Aspect ratio is preserved and the image is
-// centered in the area; the origin is the top-left corner.
+// imageToPoints converts the image to points (in millimeters) on a grid of
+// spacingMM cells. The image is scaled to fit within a sizeXMM x sizeYMM
+// area, preserving aspect ratio, and centered; the origin is the top-left
+// corner. Each grid cell whose average grayscale value is at or below
+// threshold becomes one point at the cell's center, so spacingMM controls
+// the density of the output regardless of the image's resolution.
 //
 // Points are ordered snake-style for the arm to sweep: rows go top to bottom,
 // with the first non-empty row left to right, the next non-empty row right to
-// left, and so on. Rows with no dark pixels do not flip the direction.
-func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM float64) [][2]float64 {
+// left, and so on. Rows with no dark cells do not flip the direction.
+func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM float64) [][2]float64 {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	if w == 0 || h == 0 {
@@ -352,16 +383,37 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM float64) [
 	xOffset := (sizeXMM - float64(w)*mmPerPixel) / 2
 	yOffset := (sizeYMM - float64(h)*mmPerPixel) / 2
 
+	// Average the pixels falling in each spacingMM x spacingMM grid cell.
+	cols := int(math.Ceil(float64(w) * mmPerPixel / spacingMM))
+	rows := int(math.Ceil(float64(h) * mmPerPixel / spacingMM))
+	if cols == 0 || rows == 0 {
+		return nil
+	}
+	sums := make([]float64, cols*rows)
+	counts := make([]int, cols*rows)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		cy := min(int(float64(y-bounds.Min.Y)*mmPerPixel/spacingMM), rows-1)
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			cx := min(int(float64(x-bounds.Min.X)*mmPerPixel/spacingMM), cols-1)
+			gray := color.GrayModel.Convert(img.At(x, y)).(color.Gray)
+			sums[cy*cols+cx] += float64(gray.Y)
+			counts[cy*cols+cx]++
+		}
+	}
+
 	var points [][2]float64
 	leftToRight := true
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+	for cy := 0; cy < rows; cy++ {
 		rowStart := len(points)
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			gray := color.GrayModel.Convert(img.At(x, y)).(color.Gray)
-			if gray.Y <= threshold {
+		for cx := 0; cx < cols; cx++ {
+			cell := cy*cols + cx
+			if counts[cell] == 0 {
+				continue
+			}
+			if sums[cell]/float64(counts[cell]) <= float64(threshold) {
 				points = append(points, [2]float64{
-					xOffset + (float64(x-bounds.Min.X)+0.5)*mmPerPixel,
-					yOffset + (float64(y-bounds.Min.Y)+0.5)*mmPerPixel,
+					xOffset + (float64(cx)+0.5)*spacingMM,
+					yOffset + (float64(cy)+0.5)*spacingMM,
 				})
 			}
 		}
