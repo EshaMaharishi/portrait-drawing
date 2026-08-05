@@ -16,6 +16,10 @@
     {
       "api": "rdk:service:world_state_store",
       "model": "esha:portrait-drawing:poses-to-3d-scene"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "esha:portrait-drawing:table-surface"
     }
   ],
   "entrypoint": "bin/portrait-drawing",
