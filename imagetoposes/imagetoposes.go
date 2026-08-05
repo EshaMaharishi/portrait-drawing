@@ -73,6 +73,10 @@ type Config struct {
 	// each cell whose average darkness passes the threshold becomes one pose.
 	// Match it to the pen tip width. Required.
 	PointSpacingMM *float64 `json:"point_spacing_mm"`
+	// HoverAboveMM lifts the pen between points: after each point's pose, an
+	// additional pose is generated this many millimeters above it. Set to 0
+	// to disable the hover poses. Required.
+	HoverAboveMM *float64 `json:"hover_above_mm"`
 }
 
 // Validate ensures the config is valid.
@@ -98,6 +102,12 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if *c.PointSpacingMM <= 0 {
 		return nil, nil, fmt.Errorf("point_spacing_mm must be positive, got %v", *c.PointSpacingMM)
 	}
+	if c.HoverAboveMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "hover_above_mm")
+	}
+	if *c.HoverAboveMM < 0 {
+		return nil, nil, fmt.Errorf("hover_above_mm must be non-negative, got %v", *c.HoverAboveMM)
+	}
 	return nil, nil, nil
 }
 
@@ -114,6 +124,7 @@ type imageToPosesCamera struct {
 	sizeXMM   float64
 	sizeYMM   float64
 	spacingMM float64
+	hoverMM   float64
 
 	// mu guards cachedPoses and cachedSpacingMM, set by the generate command.
 	mu              sync.Mutex
@@ -153,6 +164,7 @@ func newImageToPoses(
 		sizeXMM:   sizeXMM,
 		sizeYMM:   sizeYMM,
 		spacingMM: *cfg.PointSpacingMM,
+		hoverMM:   *cfg.HoverAboveMM,
 	}, nil
 }
 
@@ -172,10 +184,14 @@ func (s *imageToPosesCamera) Images(
 		return nil, resource.ResponseMetadata{}, errors.New("no image, call generate Do command")
 	}
 
-	points := make([][2]float64, len(cached))
-	for i, pose := range cached {
+	points := make([][2]float64, 0, len(cached))
+	for _, pose := range cached {
 		pt := pose.Point()
-		points[i] = [2]float64{pt.X - s.xMM, pt.Y - s.yMM}
+		if pt.Z != s.zMM {
+			// Skip hover poses; they duplicate a drawn point's x/y.
+			continue
+		}
+		points = append(points, [2]float64{pt.X - s.xMM, pt.Y - s.yMM})
 	}
 	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, spacingMM)
 	var buf bytes.Buffer
@@ -220,7 +236,9 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]in
 //	and top_left_y_mm attributes (the area's top-left corner), z set to the
 //	configured top_left_z_mm attribute, and an orientation vector pointing
 //	straight down (0, 0, -1) with theta 0, suitable for use as a motion
-//	service Move destination.
+//	service Move destination. When hover_above_mm is non-zero, each point's
+//	pose is followed by an additional pose that far above it, so the pen
+//	lifts between points.
 func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -271,9 +289,13 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 			s.imagePath, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
-		poses := make([]spatialmath.Pose, len(points))
-		for i, p := range points {
-			poses[i] = spatialmath.NewPose(r3.Vector{X: s.xMM + p[0], Y: s.yMM + p[1], Z: s.zMM}, downward)
+		poses := make([]spatialmath.Pose, 0, len(points)*2)
+		for _, p := range points {
+			x, y := s.xMM+p[0], s.yMM+p[1]
+			poses = append(poses, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: s.zMM}, downward))
+			if s.hoverMM > 0 {
+				poses = append(poses, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: s.zMM + s.hoverMM}, downward))
+			}
 		}
 
 		s.mu.Lock()
