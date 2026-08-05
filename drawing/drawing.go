@@ -107,9 +107,11 @@ type drawingCamera struct {
 	armName   string
 	motion    motion.Service
 
-	// mu guards cachedPoses, the poses from the last generate command.
+	// mu guards cachedPoses, the poses from the last generate command, and
+	// drawCancel, which is non-nil while a draw is in progress and cancels it.
 	mu          sync.Mutex
 	cachedPoses []spatialmath.Pose
+	drawCancel  context.CancelFunc
 }
 
 func newDrawing(
@@ -200,7 +202,9 @@ func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interfa
 //	sets the grayscale cutoff for which pixels are included. The generated
 //	poses are cached for the draw command.
 //	{"command": "draw"} - moves the configured arm through the poses cached
-//	by the last generate command, using the motion service.
+//	by the last generate command, using the motion service. Only one draw may
+//	run at a time.
+//	{"command": "stop"} - cancels the in-progress draw, if any.
 func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -261,19 +265,45 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 	case "draw":
 		s.mu.Lock()
 		cached := s.cachedPoses
-		s.mu.Unlock()
 		if len(cached) == 0 {
+			s.mu.Unlock()
 			return nil, errors.New(`no cached poses; run the "generate" command first`)
 		}
+		if s.drawCancel != nil {
+			s.mu.Unlock()
+			return nil, errors.New(`a draw is already in progress; send the "stop" command to cancel it`)
+		}
+		drawCtx, cancel := context.WithCancel(ctx)
+		s.drawCancel = cancel
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			s.drawCancel = nil
+			s.mu.Unlock()
+			cancel()
+		}()
 
 		for i, pose := range cached {
-			if err := ctx.Err(); err != nil {
-				return nil, fmt.Errorf("draw canceled after %d of %d poses: %w", i, len(cached), err)
+			if drawCtx.Err() != nil {
+				s.logger.Infof("draw stopped after %d of %d poses", i, len(cached))
+				return map[string]interface{}{
+					"status":    "stopped",
+					"completed": i,
+					"total":     len(cached),
+				}, nil
 			}
-			if _, err := s.motion.Move(ctx, motion.MoveReq{
+			if _, err := s.motion.Move(drawCtx, motion.MoveReq{
 				ComponentName: s.armName,
 				Destination:   referenceframe.NewPoseInFrame(referenceframe.World, pose),
 			}); err != nil {
+				if drawCtx.Err() != nil {
+					s.logger.Infof("draw stopped after %d of %d poses", i, len(cached))
+					return map[string]interface{}{
+						"status":    "stopped",
+						"completed": i,
+						"total":     len(cached),
+					}, nil
+				}
 				return nil, fmt.Errorf("failed to move to pose %d of %d: %w", i+1, len(cached), err)
 			}
 			if (i+1)%100 == 0 {
@@ -282,9 +312,19 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 		}
 
 		return map[string]interface{}{
-			"status": "drawing complete",
-			"count":  len(cached),
+			"status":    "drawing complete",
+			"completed": len(cached),
+			"total":     len(cached),
 		}, nil
+	case "stop":
+		s.mu.Lock()
+		cancel := s.drawCancel
+		s.mu.Unlock()
+		if cancel == nil {
+			return map[string]interface{}{"status": "no draw in progress"}, nil
+		}
+		cancel()
+		return map[string]interface{}{"status": "stop requested"}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
