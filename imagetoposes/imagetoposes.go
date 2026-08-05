@@ -340,9 +340,9 @@ func (s *imageToPosesCamera) posesResponse(poses []spatialmath.Pose, spacingMM f
 // threshold becomes one point at the cell's center, so spacingMM controls
 // the density of the output regardless of the image's resolution.
 //
-// Points are ordered snake-style for the arm to sweep: rows go top to bottom,
-// with the first non-empty row left to right, the next non-empty row right to
-// left, and so on. Rows with no dark cells do not flip the direction.
+// Points are ordered by greedy nearest neighbor: the first point is the one
+// closest to the area's top-left corner, and each subsequent point is the
+// unvisited point closest to the previous one.
 func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM float64) [][2]float64 {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
@@ -375,34 +375,82 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 		}
 	}
 
-	var points [][2]float64
-	leftToRight := true
+	// Mark the dark cells and find the one closest to the area's top-left
+	// corner (0, 0) to start from.
+	dark := make([]bool, cols*rows)
+	total := 0
+	startCX, startCY, bestStart := 0, 0, math.MaxFloat64
 	for cy := 0; cy < rows; cy++ {
-		rowStart := len(points)
 		for cx := 0; cx < cols; cx++ {
 			cell := cy*cols + cx
-			if counts[cell] == 0 {
+			if counts[cell] == 0 || sums[cell]/float64(counts[cell]) > float64(threshold) {
 				continue
 			}
-			if sums[cell]/float64(counts[cell]) <= float64(threshold) {
-				points = append(points, [2]float64{
-					xOffset + (float64(cx)+0.5)*spacingMM,
-					yOffset + (float64(cy)+0.5)*spacingMM,
-				})
+			dark[cell] = true
+			total++
+			pxMM := xOffset + (float64(cx)+0.5)*spacingMM
+			pyMM := yOffset + (float64(cy)+0.5)*spacingMM
+			if d := pxMM*pxMM + pyMM*pyMM; d < bestStart {
+				bestStart = d
+				startCX, startCY = cx, cy
 			}
 		}
-		row := points[rowStart:]
-		if len(row) == 0 {
-			continue
-		}
-		if !leftToRight {
-			for i, j := 0, len(row)-1; i < j; i, j = i+1, j-1 {
-				row[i], row[j] = row[j], row[i]
-			}
-		}
-		leftToRight = !leftToRight
 	}
-	return points
+	if total == 0 {
+		return nil
+	}
+
+	// Greedy nearest-neighbor walk over the dark cells.
+	points := make([][2]float64, 0, total)
+	cx, cy := startCX, startCY
+	for {
+		dark[cy*cols+cx] = false
+		points = append(points, [2]float64{
+			xOffset + (float64(cx)+0.5)*spacingMM,
+			yOffset + (float64(cy)+0.5)*spacingMM,
+		})
+		if len(points) == total {
+			return points
+		}
+		cx, cy = nearestDark(dark, cols, rows, cx, cy)
+	}
+}
+
+// nearestDark returns the dark cell closest (by Euclidean distance) to
+// (fromCX, fromCY), searching outward ring by ring. A match found in ring r
+// is only accepted once no closer match can exist in a farther ring.
+func nearestDark(dark []bool, cols, rows, fromCX, fromCY int) (int, int) {
+	maxR := cols
+	if rows > maxR {
+		maxR = rows
+	}
+	bestCX, bestCY, bestD := -1, -1, math.MaxInt
+	check := func(cx, cy int) {
+		if cx < 0 || cx >= cols || cy < 0 || cy >= rows || !dark[cy*cols+cx] {
+			return
+		}
+		dx, dy := cx-fromCX, cy-fromCY
+		if d := dx*dx + dy*dy; d < bestD {
+			bestD = d
+			bestCX, bestCY = cx, cy
+		}
+	}
+	for r := 1; r <= maxR; r++ {
+		// Any cell in ring r is at least distance r away; stop once the best
+		// match found so far is provably closer than all remaining rings.
+		if bestCX >= 0 && r*r > bestD {
+			break
+		}
+		for cx := fromCX - r; cx <= fromCX+r; cx++ {
+			check(cx, fromCY-r)
+			check(cx, fromCY+r)
+		}
+		for cy := fromCY - r + 1; cy <= fromCY+r-1; cy++ {
+			check(fromCX-r, cy)
+			check(fromCX+r, cy)
+		}
+	}
+	return bestCX, bestCY
 }
 
 // renderPoints draws the given points as black dots on a white canvas
