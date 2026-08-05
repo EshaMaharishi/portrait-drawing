@@ -8,6 +8,10 @@
     {
       "api": "rdk:component:camera",
       "model": "esha:portrait-drawing:drawing"
+    },
+    {
+      "api": "rdk:service:world_state_store",
+      "model": "esha:portrait-drawing:pose-store"
     }
   ],
   "entrypoint": "bin/portrait-drawing",
