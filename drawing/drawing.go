@@ -25,7 +25,8 @@ import (
 var Model = resource.NewModel("esha", "portrait-drawing", "drawing")
 
 const (
-	imagePath = "image.png"
+	// defaultImagePath is used when the image_path attribute is not set.
+	defaultImagePath = "image.png"
 	// squareSizeMM is the side length in millimeters of the square the image
 	// is mapped onto (254mm = 10in).
 	squareSizeMM = 254.0
@@ -35,9 +36,21 @@ const (
 )
 
 func init() {
-	resource.RegisterComponent(camera.API, Model, resource.Registration[camera.Camera, resource.NoNativeConfig]{
+	resource.RegisterComponent(camera.API, Model, resource.Registration[camera.Camera, *Config]{
 		Constructor: newDrawing,
 	})
+}
+
+// Config describes the attributes for this camera.
+type Config struct {
+	// ImagePath is the path to the PNG file to serve; defaults to "image.png"
+	// relative to the module's working directory.
+	ImagePath string `json:"image_path"`
+}
+
+// Validate ensures the config is valid; all attributes are optional.
+func (c *Config) Validate(path string) ([]string, []string, error) {
+	return nil, nil, nil
 }
 
 type drawingCamera struct {
@@ -45,7 +58,8 @@ type drawingCamera struct {
 	resource.AlwaysRebuild
 	resource.TriviallyCloseable
 
-	logger logging.Logger
+	logger    logging.Logger
+	imagePath string
 }
 
 func newDrawing(
@@ -54,21 +68,30 @@ func newDrawing(
 	conf resource.Config,
 	logger logging.Logger,
 ) (camera.Camera, error) {
+	cfg, err := resource.NativeConfig[*Config](conf)
+	if err != nil {
+		return nil, err
+	}
+	imagePath := cfg.ImagePath
+	if imagePath == "" {
+		imagePath = defaultImagePath
+	}
 	return &drawingCamera{
-		Named:  conf.ResourceName().AsNamed(),
-		logger: logger,
+		Named:     conf.ResourceName().AsNamed(),
+		logger:    logger,
+		imagePath: imagePath,
 	}, nil
 }
 
-// Images returns image.png from the current directory as the camera image.
+// Images returns the configured PNG file as the camera image.
 func (s *drawingCamera) Images(
 	ctx context.Context,
 	filterSourceNames []string,
 	extra map[string]interface{},
 ) ([]camera.NamedImage, resource.ResponseMetadata, error) {
-	imgBytes, err := os.ReadFile(imagePath)
+	imgBytes, err := os.ReadFile(s.imagePath)
 	if err != nil {
-		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to read %s: %w", imagePath, err)
+		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to read %s: %w", s.imagePath, err)
 	}
 	named, err := camera.NamedImageFromBytes(imgBytes, "image", rdkutils.MimeTypePNG, data.Annotations{})
 	if err != nil {
@@ -98,8 +121,8 @@ func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interfa
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
-//	{"command": "draw"} - reads image.png from the current directory and returns
-//	the dark pixels as [x, y] coordinates (in millimeters) over a 254mm x 254mm square.
+//	{"command": "draw"} - reads the configured PNG file and returns the dark
+//	pixels as [x, y] coordinates (in millimeters) over a 254mm x 254mm square.
 //	An optional "threshold" (0-255, default 128) sets the grayscale cutoff for
 //	which pixels are included.
 func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -118,19 +141,19 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 			threshold = uint8(t)
 		}
 
-		f, err := os.Open(imagePath)
+		f, err := os.Open(s.imagePath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to open %s: %w", imagePath, err)
+			return nil, fmt.Errorf("failed to open %s: %w", s.imagePath, err)
 		}
 		defer f.Close()
 
 		img, err := png.Decode(f)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode %s as PNG: %w", imagePath, err)
+			return nil, fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
 		}
 
 		points := imageToPoints(img, threshold, squareSizeMM)
-		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm square", imagePath, len(points), squareSizeMM, squareSizeMM)
+		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm square", s.imagePath, len(points), squareSizeMM, squareSizeMM)
 
 		coords := make([]interface{}, len(points))
 		for i, p := range points {
