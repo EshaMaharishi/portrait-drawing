@@ -46,13 +46,24 @@ type Config struct {
 	// ImagePath is the path to the PNG file to serve; defaults to "image.png"
 	// relative to the module's working directory.
 	ImagePath string `json:"image_path"`
+	// XMM and YMM are the position in millimeters of the top-left corner of
+	// the drawing square; the image's [x, y] coordinates (origin at the
+	// image's top-left) are offset by them. Required.
+	XMM *float64 `json:"x_mm"`
+	YMM *float64 `json:"y_mm"`
 	// ZMM is the z value in millimeters used for the poses returned by the
 	// draw command. Required.
 	ZMM *float64 `json:"z_mm"`
 }
 
-// Validate ensures the config is valid; z_mm is required.
+// Validate ensures the config is valid; x_mm, y_mm, and z_mm are required.
 func (c *Config) Validate(path string) ([]string, []string, error) {
+	if c.XMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "x_mm")
+	}
+	if c.YMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "y_mm")
+	}
 	if c.ZMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "z_mm")
 	}
@@ -66,6 +77,8 @@ type drawingCamera struct {
 
 	logger    logging.Logger
 	imagePath string
+	xMM       float64
+	yMM       float64
 	zMM       float64
 }
 
@@ -87,6 +100,8 @@ func newDrawing(
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		imagePath: imagePath,
+		xMM:       *cfg.XMM,
+		yMM:       *cfg.YMM,
 		zMM:       *cfg.ZMM,
 	}, nil
 }
@@ -131,7 +146,8 @@ func (s *drawingCamera) Geometries(ctx context.Context, extra map[string]interfa
 //
 //	{"command": "draw"} - reads the configured PNG file and returns the dark
 //	pixels as poses over a 254mm x 254mm square. Each pose has x and y in
-//	millimeters, z set to the configured z_mm attribute, and an orientation
+//	millimeters offset by the configured x_mm and y_mm attributes (the
+//	square's top-left corner), z set to the configured z_mm attribute, and an orientation
 //	vector pointing straight down (0, 0, -1) with theta 0, suitable for use as
 //	a motion service Move destination. An optional "threshold" (0-255, default
 //	128) sets the grayscale cutoff for which pixels are included.
@@ -168,8 +184,8 @@ func (s *drawingCamera) DoCommand(ctx context.Context, cmd map[string]interface{
 		poses := make([]interface{}, len(points))
 		for i, p := range points {
 			poses[i] = map[string]interface{}{
-				"x":     p[0],
-				"y":     p[1],
+				"x":     s.xMM + p[0],
+				"y":     s.yMM + p[1],
 				"z":     s.zMM,
 				"o_x":   0.0,
 				"o_y":   0.0,
