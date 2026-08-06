@@ -38,7 +38,7 @@ func init() {
 
 // Config describes the attributes for the pose store.
 type Config struct {
-	// Camera is the name of the drawing camera whose generate command
+	// Camera is the name of the drawing camera whose get_poses command
 	// supplies the poses. Required.
 	Camera string `json:"camera"`
 }
@@ -126,7 +126,7 @@ func (s *posesTo3DScene) StreamTransformChanges(
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
-//	{"command": "visualize"} - runs the camera's generate command and stores the
+//	{"command": "visualize"} - runs the camera's get_poses command and stores the
 //	returned poses as world-frame transforms for the visualizer. Optional
 //	"threshold" is forwarded to the camera, and "max_poses" (default 2000)
 //	caps how many poses are stored, sampled evenly.
@@ -139,7 +139,7 @@ func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface
 
 	switch command {
 	case "visualize":
-		camCmd := map[string]interface{}{"command": "generate"}
+		camCmd := map[string]interface{}{"command": "get_poses"}
 		if t, ok := cmd["threshold"]; ok {
 			camCmd["threshold"] = t
 		}
@@ -153,11 +153,11 @@ func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface
 
 		resp, err := s.cam.DoCommand(ctx, camCmd)
 		if err != nil {
-			return nil, fmt.Errorf("camera generate command failed: %w", err)
+			return nil, fmt.Errorf("camera get_poses command failed: %w", err)
 		}
 		rawPoses, ok := resp["poses"].([]interface{})
 		if !ok {
-			return nil, fmt.Errorf(`camera generate response has no "poses" list: %v`, resp)
+			return nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
 		}
 
 		total := len(rawPoses)

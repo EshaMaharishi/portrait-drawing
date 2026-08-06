@@ -94,7 +94,7 @@ func newPosesToArm(
 // DoCommand handles arbitrary commands. Supported commands:
 //
 //	{"command": "draw"} - fetches the poses from the image-to-poses camera's
-//	generate command and moves the configured arm through them, using the
+//	get_poses command and moves the configured arm through them, using the
 //	motion service. Only one draw may run at a time.
 //	{"command": "stop"} - cancels the in-progress draw, if any.
 func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -183,15 +183,15 @@ func (s *posesToArm) Close(ctx context.Context) error {
 	return nil
 }
 
-// fetchPoses gets the poses from the camera's generate command.
+// fetchPoses gets the poses from the camera's get_poses command.
 func (s *posesToArm) fetchPoses(ctx context.Context) ([]spatialmath.Pose, error) {
-	resp, err := s.cam.DoCommand(ctx, map[string]interface{}{"command": "generate"})
+	resp, err := s.cam.DoCommand(ctx, map[string]interface{}{"command": "get_poses"})
 	if err != nil {
-		return nil, fmt.Errorf("camera generate command failed: %w", err)
+		return nil, fmt.Errorf("camera get_poses command failed: %w", err)
 	}
 	rawPoses, ok := resp["poses"].([]interface{})
 	if !ok {
-		return nil, fmt.Errorf(`camera generate response has no "poses" list: %v`, resp)
+		return nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
 	}
 	if len(rawPoses) == 0 {
 		return nil, errors.New("camera generated no poses")

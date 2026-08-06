@@ -1,6 +1,6 @@
 // Package imagetoposes implements a camera component that converts an image
-// into drawable poses via its generate DoCommand and serves a preview of the
-// generated points as its camera image.
+// into drawable poses via its get_poses DoCommand and serves a preview of
+// the generated points as its camera image.
 package imagetoposes
 
 import (
@@ -13,7 +13,6 @@ import (
 	"image/png"
 	"math"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -143,14 +142,6 @@ type imageToPosesCamera struct {
 	// surface is the table-surface calibration service; its get_plane
 	// command provides the drawing surface's plane.
 	surface resource.Resource
-
-	// mu guards the fields below, set by the generate command. cachedPlane
-	// records the surface plane the poses were generated with, so a
-	// recalibration invalidates the cache.
-	mu              sync.Mutex
-	cachedPoses     []spatialmath.Pose
-	cachedSpacingMM float64
-	cachedPlane     [3]float64
 }
 
 func newImageToPoses(
@@ -241,34 +232,21 @@ func (s *imageToPosesCamera) surfacePlane(ctx context.Context) ([3]float64, erro
 	return plane, nil
 }
 
-// Images returns a preview of the generated XY points: one black dot per
-// point on a white canvas the size of the drawing area. It errors until the
-// generate command has cached a set of poses.
+// Images returns a preview of the XY points the get_poses command would
+// produce with the configured attributes, computed fresh from the source
+// image on every call: one black dot per point on a white canvas the size of
+// the drawing area.
 func (s *imageToPosesCamera) Images(
 	ctx context.Context,
 	filterSourceNames []string,
 	extra map[string]interface{},
 ) ([]camera.NamedImage, resource.ResponseMetadata, error) {
-	s.mu.Lock()
-	cached := s.cachedPoses
-	spacingMM := s.cachedSpacingMM
-	s.mu.Unlock()
-	if len(cached) == 0 {
-		return nil, resource.ResponseMetadata{}, errors.New("no image, call generate Do command")
+	img, _, err := s.sourceImage(ctx)
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, err
 	}
-
-	// When hovering is enabled the cached sequence alternates touch, hover;
-	// skip the hover poses since they duplicate a drawn point's x/y.
-	step := 1
-	if s.hoverMM > 0 {
-		step = 2
-	}
-	points := make([][2]float64, 0, (len(cached)+step-1)/step)
-	for i := 0; i < len(cached); i += step {
-		pt := cached[i].Point()
-		points = append(points, [2]float64{pt.X - s.xMM, pt.Y - s.yMM})
-	}
-	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, spacingMM)
+	points := imageToPoints(img, defaultThreshold, s.sizeXMM, s.sizeYMM, s.spacingMM)
+	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, s.spacingMM)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, preview); err != nil {
 		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to encode preview image: %w", err)
@@ -301,21 +279,18 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]in
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
-//	{"command": "generate"} - reads the configured PNG file or camera image
+//	{"command": "get_poses"} - reads the configured PNG file or camera image
 //	and returns the dark cells of a point_spacing_mm grid as poses over a
-//	size_x_mm x size_y_mm drawing area, caching them for the pose executor
-//	and the preview image. Once a set of poses is cached, generate returns it
-//	without recomputing, unless "threshold" (0-255, default 128) or
-//	"point_spacing_mm" overrides are passed, "force": true is passed (useful
-//	to re-grab a camera image), or the surface calibration has changed, any
-//	of which forces a regeneration. Each pose has x and y in
-//	millimeters offset by the configured top_left_x_mm and top_left_y_mm
-//	attributes (the area's top-left corner), z evaluated at that x/y from the
-//	surface service's calibrated plane, and an orientation vector pointing
-//	straight down (0, 0, -1) with theta 0, suitable for use as a motion
-//	service Move destination. When hover_above_mm is non-zero, each point's
-//	pose is followed by an additional pose that far above it, so the pen
-//	lifts between points.
+//	size_x_mm x size_y_mm drawing area, computed fresh on every call.
+//	Optional "threshold" (0-255, default 128) and "point_spacing_mm" override
+//	the defaults for this call. Each pose has x and y in millimeters offset
+//	by the configured top_left_x_mm and top_left_y_mm attributes (the area's
+//	top-left corner), z evaluated at that x/y from the surface service's
+//	calibrated plane, and an orientation vector pointing straight down
+//	(0, 0, -1) with theta 0, suitable for use as a motion service Move
+//	destination. When hover_above_mm is non-zero, each point's pose is
+//	followed by an additional pose that far above it, so the pen lifts
+//	between points.
 func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -323,15 +298,13 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 	}
 
 	switch command {
-	case "generate":
+	case "get_poses":
 		threshold := uint8(defaultThreshold)
-		overridden := false
 		if t, ok := cmd["threshold"].(float64); ok {
 			if t < 0 || t > 255 {
 				return nil, fmt.Errorf("threshold must be between 0 and 255, got %v", t)
 			}
 			threshold = uint8(t)
-			overridden = true
 		}
 		spacingMM := s.spacingMM
 		if sp, ok := cmd["point_spacing_mm"].(float64); ok {
@@ -339,24 +312,11 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 				return nil, fmt.Errorf("point_spacing_mm must be positive, got %v", sp)
 			}
 			spacingMM = sp
-			overridden = true
-		}
-		if force, ok := cmd["force"].(bool); ok && force {
-			overridden = true
 		}
 
 		plane, err := s.surfacePlane(ctx)
 		if err != nil {
 			return nil, err
-		}
-
-		s.mu.Lock()
-		cached := s.cachedPoses
-		cachedSpacingMM := s.cachedSpacingMM
-		cachedPlane := s.cachedPlane
-		s.mu.Unlock()
-		if len(cached) > 0 && !overridden && plane == cachedPlane {
-			return s.posesResponse(cached, cachedSpacingMM), nil
 		}
 
 		img, source, err := s.sourceImage(ctx)
@@ -379,19 +339,13 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 			}
 		}
 
-		s.mu.Lock()
-		s.cachedPoses = poses
-		s.cachedSpacingMM = spacingMM
-		s.cachedPlane = plane
-		s.mu.Unlock()
-
 		return s.posesResponse(poses, spacingMM), nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
 }
 
-// posesResponse builds the generate response for a set of poses.
+// posesResponse builds the get_poses response for a set of poses.
 func (s *imageToPosesCamera) posesResponse(poses []spatialmath.Pose, spacingMM float64) map[string]interface{} {
 	out := make([]interface{}, len(poses))
 	for i, pose := range poses {
