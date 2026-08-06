@@ -72,6 +72,46 @@ func TestImageToPointsNearestNeighborOrder(t *testing.T) {
 	}
 }
 
+func TestRotateImage(t *testing.T) {
+	// 2x1 image: black at (0,0), white at (1,0).
+	img := image.NewGray(image.Rect(0, 0, 2, 1))
+	img.SetGray(0, 0, color.Gray{Y: 0})
+	img.SetGray(1, 0, color.Gray{Y: 255})
+
+	grayAt := func(img image.Image, x, y int) uint8 {
+		return color.GrayModel.Convert(img.At(x, y)).(color.Gray).Y
+	}
+
+	// 90 clockwise: the black left pixel moves to the top.
+	r90 := rotateImage(img, 90)
+	if b := r90.Bounds(); b.Dx() != 1 || b.Dy() != 2 {
+		t.Fatalf("expected 1x2 after 90, got %dx%d", b.Dx(), b.Dy())
+	}
+	if grayAt(r90, 0, 0) != 0 || grayAt(r90, 0, 1) != 255 {
+		t.Errorf("after 90, expected black on top, got top=%d bottom=%d", grayAt(r90, 0, 0), grayAt(r90, 0, 1))
+	}
+
+	// 180: black moves to the right.
+	r180 := rotateImage(img, 180)
+	if grayAt(r180, 0, 0) != 255 || grayAt(r180, 1, 0) != 0 {
+		t.Errorf("after 180, expected black on the right, got left=%d right=%d", grayAt(r180, 0, 0), grayAt(r180, 1, 0))
+	}
+
+	// 270 clockwise: black moves to the bottom.
+	r270 := rotateImage(img, 270)
+	if b := r270.Bounds(); b.Dx() != 1 || b.Dy() != 2 {
+		t.Fatalf("expected 1x2 after 270, got %dx%d", b.Dx(), b.Dy())
+	}
+	if grayAt(r270, 0, 0) != 255 || grayAt(r270, 0, 1) != 0 {
+		t.Errorf("after 270, expected black on the bottom, got top=%d bottom=%d", grayAt(r270, 0, 0), grayAt(r270, 0, 1))
+	}
+
+	// 0 returns the image unchanged.
+	if r0 := rotateImage(img, 0); r0 != image.Image(img) {
+		t.Error("expected 0 degrees to return the original image")
+	}
+}
+
 func TestRenderPoints(t *testing.T) {
 	// 100mm x 50mm area at 4px/mm gives a 400x200 canvas. One point at
 	// (25, 25) with 2mm spacing should paint a dot at pixel (100, 100).

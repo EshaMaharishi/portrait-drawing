@@ -79,6 +79,9 @@ type Config struct {
 	// is dark enough to draw; lower values keep only darker cells. Defaults
 	// to 128.
 	Threshold *float64 `json:"threshold"`
+	// RotateDegrees rotates the source image clockwise before conversion.
+	// Must be 0, 90, 180, or 270. Defaults to 0.
+	RotateDegrees float64 `json:"rotate_degrees"`
 	// HoverAboveMM lifts the pen between points: after each point's pose, an
 	// additional pose is generated this many millimeters above it. Set to 0
 	// to disable the hover poses. Required.
@@ -117,6 +120,11 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.Threshold != nil && (*c.Threshold < 0 || *c.Threshold > 255) {
 		return nil, nil, fmt.Errorf("threshold must be between 0 and 255, got %v", *c.Threshold)
 	}
+	switch c.RotateDegrees {
+	case 0, 90, 180, 270:
+	default:
+		return nil, nil, fmt.Errorf("rotate_degrees must be 0, 90, 180, or 270, got %v", c.RotateDegrees)
+	}
 	if c.HoverAboveMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "hover_above_mm")
 	}
@@ -147,6 +155,7 @@ type imageToPosesCamera struct {
 	spacingMM float64
 	threshold uint8
 	hoverMM   float64
+	rotateDeg int
 	// surface is the table-surface calibration service; its get_plane
 	// command provides the drawing surface's plane.
 	surface resource.Resource
@@ -199,20 +208,21 @@ func newImageToPoses(
 		spacingMM: *cfg.PointSpacingMM,
 		threshold: threshold,
 		hoverMM:   *cfg.HoverAboveMM,
+		rotateDeg: int(cfg.RotateDegrees),
 		surface:   surface,
 	}, nil
 }
 
 // sourceImage returns the image to convert - read from the configured
-// camera, or decoded from the configured PNG file - along with a description
-// of the source for logging.
+// camera, or decoded from the configured PNG file, then rotated by
+// rotate_degrees - along with a description of the source for logging.
 func (s *imageToPosesCamera) sourceImage(ctx context.Context) (image.Image, string, error) {
 	if s.srcCam != nil {
 		img, err := camera.DecodeImageFromCamera(ctx, s.srcCam, nil, nil)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to get image from camera: %w", err)
 		}
-		return img, "camera image", nil
+		return rotateImage(img, s.rotateDeg), "camera image", nil
 	}
 
 	f, err := os.Open(s.imagePath)
@@ -224,7 +234,45 @@ func (s *imageToPosesCamera) sourceImage(ctx context.Context) (image.Image, stri
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
 	}
-	return img, s.imagePath, nil
+	return rotateImage(img, s.rotateDeg), s.imagePath, nil
+}
+
+// rotateImage rotates the image clockwise by the given degrees, which must
+// be 0, 90, 180, or 270.
+func rotateImage(img image.Image, degrees int) image.Image {
+	if degrees == 0 {
+		return img
+	}
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+
+	var out *image.RGBA
+	switch degrees {
+	case 90:
+		out = image.NewRGBA(image.Rect(0, 0, h, w))
+		for y := 0; y < w; y++ {
+			for x := 0; x < h; x++ {
+				out.Set(x, y, img.At(bounds.Min.X+y, bounds.Min.Y+h-1-x))
+			}
+		}
+	case 180:
+		out = image.NewRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out.Set(x, y, img.At(bounds.Min.X+w-1-x, bounds.Min.Y+h-1-y))
+			}
+		}
+	case 270:
+		out = image.NewRGBA(image.Rect(0, 0, h, w))
+		for y := 0; y < w; y++ {
+			for x := 0; x < h; x++ {
+				out.Set(x, y, img.At(bounds.Min.X+w-1-y, bounds.Min.Y+x))
+			}
+		}
+	default:
+		return img
+	}
+	return out
 }
 
 // surfacePlane fetches the drawing surface's plane coefficients from the
