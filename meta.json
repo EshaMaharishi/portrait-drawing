@@ -10,6 +10,10 @@
       "model": "esha:portrait-drawing:image-to-poses"
     },
     {
+      "api": "rdk:component:camera",
+      "model": "esha:portrait-drawing:background-removal"
+    },
+    {
       "api": "rdk:service:generic",
       "model": "esha:portrait-drawing:poses-to-arm"
     },
