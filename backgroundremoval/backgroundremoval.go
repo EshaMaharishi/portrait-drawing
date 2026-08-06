@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"sort"
 
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/data"
@@ -195,7 +196,56 @@ func (s *backgroundRemovalCamera) Geometries(ctx context.Context, extra map[stri
 	return nil, nil
 }
 
-// DoCommand supports no commands.
+// DoCommand handles arbitrary commands. Supported commands:
+//
+//	{"command": "depth_stats"} - reports statistics of the source camera's
+//	current depth frame (center value, non-zero min/max/median, percent with
+//	no reading), for calibrating max_depth_mm. Stand at a known distance and
+//	compare the center value to deduce the depth units.
 func (s *backgroundRemovalCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return nil, errors.New("no commands supported")
+	command, ok := cmd["command"].(string)
+	if !ok {
+		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
+	}
+
+	switch command {
+	case "depth_stats":
+		namedImages, _, err := s.srcCam.Images(ctx, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get images from source camera: %w", err)
+		}
+		_, depthMap, err := splitColorAndDepth(ctx, namedImages)
+		if err != nil {
+			return nil, err
+		}
+
+		w, h := depthMap.Width(), depthMap.Height()
+		var nonZero []float64
+		zeros := 0
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				d := float64(depthMap.GetDepth(x, y))
+				if d == 0 {
+					zeros++
+				} else {
+					nonZero = append(nonZero, d)
+				}
+			}
+		}
+		resp := map[string]interface{}{
+			"width":        w,
+			"height":       h,
+			"center_value": float64(depthMap.GetDepth(w/2, h/2)),
+			"percent_zero": 100 * float64(zeros) / float64(w*h),
+		}
+		if len(nonZero) > 0 {
+			sort.Float64s(nonZero)
+			resp["min_nonzero"] = nonZero[0]
+			resp["median_nonzero"] = nonZero[len(nonZero)/2]
+			resp["max"] = nonZero[len(nonZero)-1]
+		}
+		return resp, nil
+	default:
+		return nil, fmt.Errorf("unknown command: %q", command)
+	}
 }
