@@ -112,6 +112,20 @@ func TestRotateImage(t *testing.T) {
 	}
 }
 
+func TestMirrorImage(t *testing.T) {
+	// 2x1 image: black at (0,0), white at (1,0); mirrored, black moves right.
+	img := image.NewGray(image.Rect(0, 0, 2, 1))
+	img.SetGray(0, 0, color.Gray{Y: 0})
+	img.SetGray(1, 0, color.Gray{Y: 255})
+
+	m := mirrorImage(img)
+	left := color.GrayModel.Convert(m.At(0, 0)).(color.Gray).Y
+	right := color.GrayModel.Convert(m.At(1, 0)).(color.Gray).Y
+	if left != 255 || right != 0 {
+		t.Errorf("expected black to move to the right, got left=%d right=%d", left, right)
+	}
+}
+
 func TestRenderPoints(t *testing.T) {
 	// 100mm x 50mm area at 4px/mm gives a 400x200 canvas. One point at
 	// (25, 25) with 2mm spacing should paint a dot at pixel (100, 100).

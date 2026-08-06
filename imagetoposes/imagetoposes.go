@@ -259,6 +259,19 @@ func (s *imageToPosesCamera) sourceImage(ctx context.Context) (image.Image, stri
 	return img, s.imagePath, nil
 }
 
+// mirrorImage flips the image left-right.
+func mirrorImage(img image.Image) image.Image {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			out.Set(x, y, img.At(bounds.Min.X+w-1-x, bounds.Min.Y+y))
+		}
+	}
+	return out
+}
+
 // rotateImage rotates the image clockwise by the given degrees, which must
 // be 0, 90, 180, or 270.
 func rotateImage(img image.Image, degrees int) image.Image {
@@ -408,7 +421,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		if err != nil {
 			return nil, err
 		}
-		img = rotateImage(img, s.rotateDeg)
+		img = mirrorImage(rotateImage(img, s.rotateDeg))
 
 		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM, s.denseN)
 		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area at %.1fmm spacing",
