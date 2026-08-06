@@ -75,6 +75,10 @@ type Config struct {
 	// each cell whose average darkness passes the threshold becomes one pose.
 	// Match it to the pen tip width. Required.
 	PointSpacingMM *float64 `json:"point_spacing_mm"`
+	// Threshold is the grayscale value (0-255) at or below which a grid cell
+	// is dark enough to draw; lower values keep only darker cells. Defaults
+	// to 128.
+	Threshold *float64 `json:"threshold"`
 	// HoverAboveMM lifts the pen between points: after each point's pose, an
 	// additional pose is generated this many millimeters above it. Set to 0
 	// to disable the hover poses. Required.
@@ -110,6 +114,9 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if *c.PointSpacingMM <= 0 {
 		return nil, nil, fmt.Errorf("point_spacing_mm must be positive, got %v", *c.PointSpacingMM)
 	}
+	if c.Threshold != nil && (*c.Threshold < 0 || *c.Threshold > 255) {
+		return nil, nil, fmt.Errorf("threshold must be between 0 and 255, got %v", *c.Threshold)
+	}
 	if c.HoverAboveMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "hover_above_mm")
 	}
@@ -138,6 +145,7 @@ type imageToPosesCamera struct {
 	sizeXMM   float64
 	sizeYMM   float64
 	spacingMM float64
+	threshold uint8
 	hoverMM   float64
 	// surface is the table-surface calibration service; its get_plane
 	// command provides the drawing surface's plane.
@@ -169,6 +177,10 @@ func newImageToPoses(
 	if sizeYMM == 0 {
 		sizeYMM = defaultSizeMM
 	}
+	threshold := uint8(defaultThreshold)
+	if cfg.Threshold != nil {
+		threshold = uint8(*cfg.Threshold)
+	}
 
 	surface, err := resource.FromDependencies[resource.Resource](deps, generic.Named(cfg.Surface))
 	if err != nil {
@@ -185,6 +197,7 @@ func newImageToPoses(
 		sizeXMM:   sizeXMM,
 		sizeYMM:   sizeYMM,
 		spacingMM: *cfg.PointSpacingMM,
+		threshold: threshold,
 		hoverMM:   *cfg.HoverAboveMM,
 		surface:   surface,
 	}, nil
@@ -245,7 +258,7 @@ func (s *imageToPosesCamera) Images(
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-	points := imageToPoints(img, defaultThreshold, s.sizeXMM, s.sizeYMM, s.spacingMM)
+	points := imageToPoints(img, s.threshold, s.sizeXMM, s.sizeYMM, s.spacingMM)
 	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, s.spacingMM)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, preview); err != nil {
@@ -299,7 +312,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 
 	switch command {
 	case "get_poses":
-		threshold := uint8(defaultThreshold)
+		threshold := s.threshold
 		if t, ok := cmd["threshold"].(float64); ok {
 			if t < 0 || t > 255 {
 				return nil, fmt.Errorf("threshold must be between 0 and 255, got %v", t)
