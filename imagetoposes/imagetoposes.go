@@ -374,7 +374,8 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]in
 //	(0, 0, -1) with theta 0, suitable for use as a motion service Move
 //	destination. When hover_above_mm is non-zero, each point's pose is
 //	followed by an additional pose that far above it, so the pen lifts
-//	between points.
+//	between points, and the sequence starts and ends with a pose at double
+//	hover height above the first point.
 func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -414,7 +415,18 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 			source, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
-		poses := make([]poseEntry, 0, len(points)*2)
+		poses := make([]poseEntry, 0, len(points)*2+2)
+
+		// Start and end at double hover height above the first point, so the
+		// arm approaches from safely above and retreats there when done.
+		var homeEntry *poseEntry
+		if s.hoverMM > 0 && len(points) > 0 {
+			x, y := s.xMM+points[0][0], s.yMM+points[0][1]
+			z := plane[0]*x + plane[1]*y + plane[2]
+			homeEntry = &poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + 2*s.hoverMM}, downward)}
+			poses = append(poses, *homeEntry)
+		}
+
 		var prevX, prevY float64
 		for i, p := range points {
 			x, y := s.xMM+p[0], s.yMM+p[1]
@@ -434,6 +446,9 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 				poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward)})
 			}
 			prevX, prevY = x, y
+		}
+		if homeEntry != nil {
+			poses = append(poses, *homeEntry)
 		}
 
 		return s.posesResponse(poses, spacingMM), nil
