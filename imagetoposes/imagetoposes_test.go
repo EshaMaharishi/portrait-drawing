@@ -18,7 +18,7 @@ func TestImageToPoints(t *testing.T) {
 	img.SetGray(3, 1, color.Gray{Y: 0})
 
 	// 63.5mm spacing matches the pixel size, so cells map 1:1 to pixels.
-	points := imageToPoints(img, 128, 254.0, 254.0, 63.5)
+	points := imageToPoints(img, 128, 254.0, 254.0, 63.5, 1)
 
 	if len(points) != 2 {
 		t.Fatalf("expected 2 points, got %d: %v", len(points), points)
@@ -50,7 +50,7 @@ func TestImageToPointsNearestNeighborOrder(t *testing.T) {
 	img.SetGray(0, 2, color.Gray{Y: 0})
 	img.SetGray(3, 2, color.Gray{Y: 0})
 
-	points := imageToPoints(img, 128, 254.0, 254.0, 63.5)
+	points := imageToPoints(img, 128, 254.0, 254.0, 63.5, 1)
 
 	// 63.5mm per pixel; height is 3px = 190.5mm, so yOffset is 31.75mm.
 	// The walk starts at (0,0) (closest to the top-left corner), then its
@@ -132,6 +132,45 @@ func TestRenderPoints(t *testing.T) {
 	}
 }
 
+func TestImageToPointsDenseBlocks(t *testing.T) {
+	// 4x4 all-black image with 63.5mm spacing gives a fully dark 4x4 grid.
+	// With dense_block_size 2, each of the four full 2x2 blocks collapses to
+	// its center cell (offset +1,+1 from the block corner).
+	img := image.NewGray(image.Rect(0, 0, 4, 4))
+
+	points := imageToPoints(img, 128, 254.0, 254.0, 63.5, 2)
+
+	// Kept cells: (1,1), (3,1), (1,3), (3,3). The walk starts at (1,1); the
+	// two-cell jumps to (1,3) and (3,1) tie, and the ring search checks rows
+	// above/below before columns, so (1,3) wins, then (3,3), then (3,1).
+	want := [][2]float64{
+		{95.25, 95.25},
+		{95.25, 222.25},
+		{222.25, 222.25},
+		{222.25, 95.25},
+	}
+	if len(points) != len(want) {
+		t.Fatalf("expected %d points, got %d: %v", len(want), len(points), points)
+	}
+	for i, p := range points {
+		if p != want[i] {
+			t.Errorf("point %d: got %v, want %v", i, p, want[i])
+		}
+	}
+}
+
+func TestImageToPointsDenseBlocksKeepsPartial(t *testing.T) {
+	// 2x2 image where only three pixels are black: the block is not fully
+	// dark, so dense_block_size 2 must leave all three dots in place.
+	img := image.NewGray(image.Rect(0, 0, 2, 2))
+	img.SetGray(1, 1, color.Gray{Y: 255})
+
+	points := imageToPoints(img, 128, 254.0, 254.0, 127.0, 2)
+	if len(points) != 3 {
+		t.Fatalf("expected 3 points for a partially dark block, got %d: %v", len(points), points)
+	}
+}
+
 func TestImageToPointsAllWhite(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 3, 3))
 	for y := 0; y < 3; y++ {
@@ -139,7 +178,7 @@ func TestImageToPointsAllWhite(t *testing.T) {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
-	if points := imageToPoints(img, 128, 254.0, 254.0, 63.5); len(points) != 0 {
+	if points := imageToPoints(img, 128, 254.0, 254.0, 63.5, 1); len(points) != 0 {
 		t.Errorf("expected no points for an all-white image, got %v", points)
 	}
 }
@@ -157,7 +196,7 @@ func TestImageToPointsDownsamples(t *testing.T) {
 	img.SetGray(0, 0, color.Gray{Y: 0})
 	img.SetGray(1, 0, color.Gray{Y: 0})
 
-	points := imageToPoints(img, 128, 254.0, 254.0, 127.0)
+	points := imageToPoints(img, 128, 254.0, 254.0, 127.0, 1)
 
 	// The image spans 254mm x 127mm, so yOffset is 63.5mm. The kept cell's
 	// center is at (0.5*127, 63.5 + 0.5*127).

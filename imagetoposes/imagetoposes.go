@@ -92,6 +92,11 @@ type Config struct {
 	// hover height instead of arcing. 0 (the default) disables it. Only
 	// applies when hover_above_mm is non-zero.
 	MaxHoverTravelMM float64 `json:"max_hover_travel_mm"`
+	// DenseBlockSize thins solid fills: every fully dark n x n block of grid
+	// cells is replaced by a single dot at its center, so dense regions
+	// don't take as long to draw. Partially dark blocks (edges, detail)
+	// keep all their dots. 0 or 1 (the default) disables it.
+	DenseBlockSize float64 `json:"dense_block_size"`
 }
 
 // Validate ensures the config is valid.
@@ -134,6 +139,9 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.MaxHoverTravelMM < 0 {
 		return nil, nil, fmt.Errorf("max_hover_travel_mm must be non-negative, got %v", c.MaxHoverTravelMM)
 	}
+	if c.DenseBlockSize < 0 || c.DenseBlockSize != float64(int(c.DenseBlockSize)) {
+		return nil, nil, fmt.Errorf("dense_block_size must be a non-negative integer, got %v", c.DenseBlockSize)
+	}
 	if c.HoverAboveMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "hover_above_mm")
 	}
@@ -166,6 +174,7 @@ type imageToPosesCamera struct {
 	hoverMM     float64
 	maxTravelMM float64
 	rotateDeg   int
+	denseN      int
 	// surface is the table-surface calibration service; its get_plane
 	// command provides the drawing surface's plane.
 	surface resource.Resource
@@ -220,6 +229,7 @@ func newImageToPoses(
 		hoverMM:     *cfg.HoverAboveMM,
 		maxTravelMM: cfg.MaxHoverTravelMM,
 		rotateDeg:   int(cfg.RotateDegrees),
+		denseN:      int(cfg.DenseBlockSize),
 		surface:     surface,
 	}, nil
 }
@@ -319,7 +329,7 @@ func (s *imageToPosesCamera) Images(
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-	points := imageToPoints(img, s.threshold, s.sizeXMM, s.sizeYMM, s.spacingMM)
+	points := imageToPoints(img, s.threshold, s.sizeXMM, s.sizeYMM, s.spacingMM, s.denseN)
 	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, s.spacingMM)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, preview); err != nil {
@@ -399,7 +409,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		}
 		img = rotateImage(img, s.rotateDeg)
 
-		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM)
+		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM, s.denseN)
 		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area at %.1fmm spacing",
 			source, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
 
@@ -471,10 +481,13 @@ func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64)
 // threshold becomes one point at the cell's center, so spacingMM controls
 // the density of the output regardless of the image's resolution.
 //
+// When denseN is greater than 1, every fully dark denseN x denseN block of
+// cells is replaced by a single dot at its center, thinning solid fills.
+//
 // Points are ordered by greedy nearest neighbor: the first point is the one
 // closest to the area's top-left corner, and each subsequent point is the
 // unvisited point closest to the previous one.
-func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM float64) [][2]float64 {
+func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM float64, denseN int) [][2]float64 {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	if w == 0 || h == 0 {
@@ -506,18 +519,27 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 		}
 	}
 
-	// Mark the dark cells and find the one closest to the area's top-left
-	// corner (0, 0) to start from.
+	// Mark the dark cells.
 	dark := make([]bool, cols*rows)
+	for cy := 0; cy < rows; cy++ {
+		for cx := 0; cx < cols; cx++ {
+			cell := cy*cols + cx
+			if counts[cell] > 0 && sums[cell]/float64(counts[cell]) <= float64(threshold) {
+				dark[cell] = true
+			}
+		}
+	}
+	collapseDenseBlocks(dark, cols, rows, denseN)
+
+	// Count the remaining dark cells and find the one closest to the area's
+	// top-left corner (0, 0) to start from.
 	total := 0
 	startCX, startCY, bestStart := 0, 0, math.MaxFloat64
 	for cy := 0; cy < rows; cy++ {
 		for cx := 0; cx < cols; cx++ {
-			cell := cy*cols + cx
-			if counts[cell] == 0 || sums[cell]/float64(counts[cell]) > float64(threshold) {
+			if !dark[cy*cols+cx] {
 				continue
 			}
-			dark[cell] = true
 			total++
 			pxMM := xOffset + (float64(cx)+0.5)*spacingMM
 			pyMM := yOffset + (float64(cy)+0.5)*spacingMM
@@ -544,6 +566,38 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 			return points
 		}
 		cx, cy = nearestDark(dark, cols, rows, cx, cy)
+	}
+}
+
+// collapseDenseBlocks replaces every fully dark n x n block of grid cells
+// with its single center cell. Blocks are tiled from the grid's top-left;
+// partial blocks at the right/bottom edges and blocks with any light cell
+// are left untouched.
+func collapseDenseBlocks(dark []bool, cols, rows, n int) {
+	if n <= 1 {
+		return
+	}
+	for by := 0; by+n <= rows; by += n {
+		for bx := 0; bx+n <= cols; bx += n {
+			full := true
+			for cy := by; cy < by+n && full; cy++ {
+				for cx := bx; cx < bx+n; cx++ {
+					if !dark[cy*cols+cx] {
+						full = false
+						break
+					}
+				}
+			}
+			if !full {
+				continue
+			}
+			for cy := by; cy < by+n; cy++ {
+				for cx := bx; cx < bx+n; cx++ {
+					dark[cy*cols+cx] = false
+				}
+			}
+			dark[(by+n/2)*cols+(bx+n/2)] = true
+		}
 	}
 }
 
