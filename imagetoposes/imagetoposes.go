@@ -110,7 +110,7 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if *c.HoverAboveMM < 0 {
 		return nil, nil, fmt.Errorf("hover_above_mm must be non-negative, got %v", *c.HoverAboveMM)
 	}
-	return nil, nil, nil
+	return []string{c.Surface}, nil, nil
 }
 
 type imageToPosesCamera struct {
