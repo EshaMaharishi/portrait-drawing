@@ -1,6 +1,7 @@
 // Package backgroundremoval implements a camera component that removes the
-// background from another camera's image using its depth frame: color pixels
-// farther than a depth cutoff are painted white, keeping only the subject.
+// background from another camera's image using its point cloud: color pixels
+// with no 3D point nearer than a depth cutoff are painted white, keeping
+// only the subject.
 package backgroundremoval
 
 import (
@@ -13,18 +14,26 @@ import (
 	"image/png"
 	"sort"
 
+	"github.com/golang/geo/r3"
+
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/rimage"
+	"go.viam.com/rdk/rimage/transform"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
 // Model is the full model triplet for this camera.
 var Model = resource.NewModel("esha", "portrait-drawing", "background-removal")
+
+// maskGridDiv is the downscale factor of the foreground mask grid relative
+// to the color image. Projected points splat into grid cells, so a coarser
+// grid fills the gaps between neighboring points.
+const maskGridDiv = 4
 
 func init() {
 	resource.RegisterComponent(camera.API, Model, resource.Registration[camera.Camera, *Config]{
@@ -34,21 +43,20 @@ func init() {
 
 // Config describes the attributes for this camera.
 type Config struct {
-	// Camera is the name of the source camera; it must serve both a color
-	// and a depth image (e.g. an Orbbec Astra 2). Required.
+	// Camera is the name of the source camera; it must serve a color image,
+	// a point cloud, and intrinsic parameters (e.g. an Orbbec Astra 2).
+	// Required.
 	Camera string `json:"camera"`
-	// MaxDepthMM is the depth cutoff in millimeters: color pixels whose
-	// depth reading is farther than this (or missing) are treated as
-	// background and painted white. Required.
+	// MaxDepthMM is the depth cutoff in millimeters: color pixels with no
+	// point cloud return nearer than this are treated as background and
+	// painted white. Required.
 	MaxDepthMM *float64 `json:"max_depth_mm"`
-	// DepthSource and ColorSource pin which of the source camera's named
-	// images to use, for cameras that serve more than two (e.g. color,
-	// depth, and IR). When unset, the first image that decodes as a depth
-	// map is used as depth and the first that does not as color.
-	DepthSource string `json:"depth_source"`
+	// ColorSource pins which of the source camera's named images is the
+	// color image. When unset, the first image that does not decode as a
+	// depth map is used.
 	ColorSource string `json:"color_source"`
-	// DepthScale converts the depth frame's raw values to millimeters:
-	// mm = raw * depth_scale. Defaults to 1 (values already in mm). Set to
+	// DepthScale converts the point cloud's units to millimeters:
+	// mm = value * depth_scale. Defaults to 1 (values already in mm). Set to
 	// 1000 for a camera that reports meters.
 	DepthScale float64 `json:"depth_scale"`
 }
@@ -79,7 +87,6 @@ type backgroundRemovalCamera struct {
 	srcCam      camera.Camera
 	maxDepthMM  float64
 	depthScale  float64
-	depthSource string
 	colorSource string
 }
 
@@ -107,13 +114,13 @@ func newBackgroundRemoval(
 		srcCam:      srcCam,
 		maxDepthMM:  *cfg.MaxDepthMM,
 		depthScale:  depthScale,
-		depthSource: cfg.DepthSource,
 		colorSource: cfg.ColorSource,
 	}, nil
 }
 
 // Images returns the source camera's color image with pixels beyond the
-// depth cutoff painted white.
+// depth cutoff painted white, using the source camera's point cloud
+// projected through its intrinsics.
 func (s *backgroundRemovalCamera) Images(
 	ctx context.Context,
 	filterSourceNames []string,
@@ -123,13 +130,21 @@ func (s *backgroundRemovalCamera) Images(
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to get images from source camera: %w", err)
 	}
-
-	colorImg, depthMap, err := splitColorAndDepth(ctx, namedImages, s.colorSource, s.depthSource)
+	colorImg, err := colorImage(ctx, namedImages, s.colorSource)
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
 
-	masked := maskByDepth(colorImg, depthMap, s.maxDepthMM/s.depthScale)
+	pc, err := s.srcCam.NextPointCloud(ctx, nil)
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to get point cloud from source camera: %w", err)
+	}
+	intrinsics, err := s.intrinsics(ctx)
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, err
+	}
+
+	masked := maskByPointCloud(colorImg, pc, intrinsics, s.maxDepthMM/s.depthScale)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, masked); err != nil {
 		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to encode masked image: %w", err)
@@ -141,81 +156,96 @@ func (s *backgroundRemovalCamera) Images(
 	return []camera.NamedImage{named}, meta, nil
 }
 
-// splitColorAndDepth finds the color image and the depth map among a
-// camera's named images. When colorSource/depthSource are non-empty, images
-// are matched by source name; otherwise the depth image is the first that
-// decodes as a depth map and the color image is the first that does not.
-func splitColorAndDepth(
-	ctx context.Context,
-	namedImages []camera.NamedImage,
-	colorSource, depthSource string,
-) (image.Image, *rimage.DepthMap, error) {
-	var colorImg image.Image
-	var depthMap *rimage.DepthMap
+// intrinsics fetches the source camera's pinhole intrinsics, required to
+// project point cloud points onto the color image.
+func (s *backgroundRemovalCamera) intrinsics(ctx context.Context) (*transform.PinholeCameraIntrinsics, error) {
+	props, err := s.srcCam.Properties(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get source camera properties: %w", err)
+	}
+	if props.IntrinsicParams == nil || props.IntrinsicParams.Fx == 0 || props.IntrinsicParams.Fy == 0 {
+		return nil, errors.New("source camera does not provide intrinsic parameters, which are needed to project its point cloud onto the color image")
+	}
+	return props.IntrinsicParams, nil
+}
+
+// colorImage finds the color image among a camera's named images: the one
+// named colorSource when set, otherwise the first that does not decode as a
+// depth map.
+func colorImage(ctx context.Context, namedImages []camera.NamedImage, colorSource string) (image.Image, error) {
 	var sources []string
 	for i := range namedImages {
 		name := namedImages[i].SourceName
 		sources = append(sources, name)
-		if colorSource != "" && name != colorSource && depthSource != "" && name != depthSource {
+		if colorSource != "" && name != colorSource {
 			continue
 		}
 		img, err := namedImages[i].Image(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decode image from source %q: %w", name, err)
+			return nil, fmt.Errorf("failed to decode image from source %q: %w", name, err)
 		}
-		dm, dmErr := rimage.ConvertImageToDepthMap(ctx, img)
-
-		switch {
-		case depthSource != "" && name == depthSource:
-			if dmErr != nil {
-				return nil, nil, fmt.Errorf("depth_source %q does not decode as a depth map (%T)", name, img)
-			}
-			depthMap = dm
-		case colorSource != "" && name == colorSource:
-			colorImg = img
-		case depthSource == "" && dmErr == nil && depthMap == nil:
-			depthMap = dm
-		case colorSource == "" && dmErr != nil && colorImg == nil:
-			colorImg = img
+		if colorSource != "" {
+			return img, nil
+		}
+		if _, err := rimage.ConvertImageToDepthMap(ctx, img); err != nil {
+			return img, nil
 		}
 	}
-	if colorImg == nil || depthMap == nil {
-		return nil, nil, fmt.Errorf(
-			"could not find both a color and a depth image, got sources %v (color found: %t, depth found: %t); "+
-				"set color_source and depth_source to pin them by name",
-			sources, colorImg != nil, depthMap != nil)
-	}
-	return colorImg, depthMap, nil
+	return nil, fmt.Errorf("could not find a color image among sources %v; set color_source to pin it by name", sources)
 }
 
-// maskByDepth returns a copy of the color image with every pixel whose depth
-// is missing or beyond maxDepthMM painted white. The depth map may have a
-// different resolution than the color image; coordinates are scaled
-// proportionally, which assumes the two frames are aligned.
-func maskByDepth(colorImg image.Image, depthMap *rimage.DepthMap, maxDepthMM float64) image.Image {
+// maskByPointCloud returns a copy of the color image where only pixels with
+// a point cloud return nearer than maxDepth survive; everything else is
+// painted white. Points are projected onto the image through the camera's
+// intrinsics and splatted into a grid maskGridDiv times coarser than the
+// image, which fills the gaps between neighboring points.
+func maskByPointCloud(
+	colorImg image.Image,
+	pc pointcloud.PointCloud,
+	intrinsics *transform.PinholeCameraIntrinsics,
+	maxDepth float64,
+) image.Image {
 	bounds := colorImg.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
-	dw, dh := depthMap.Width(), depthMap.Height()
-	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	gw, gh := (w+maskGridDiv-1)/maskGridDiv, (h+maskGridDiv-1)/maskGridDiv
+	foreground := make([]bool, gw*gh)
 
+	// Intrinsics may be calibrated at a different resolution than the served
+	// color image; scale projected pixels accordingly.
+	scaleX, scaleY := 1.0, 1.0
+	if intrinsics.Width > 0 && intrinsics.Height > 0 {
+		scaleX = float64(w) / float64(intrinsics.Width)
+		scaleY = float64(h) / float64(intrinsics.Height)
+	}
+
+	pc.Iterate(0, 0, func(p r3.Vector, _ pointcloud.Data) bool {
+		if p.Z <= 0 || p.Z > maxDepth {
+			return true
+		}
+		px, py := intrinsics.PointToPixel(p.X, p.Y, p.Z)
+		gx, gy := int(px*scaleX)/maskGridDiv, int(py*scaleY)/maskGridDiv
+		if gx >= 0 && gx < gw && gy >= 0 && gy < gh {
+			foreground[gy*gw+gx] = true
+		}
+		return true
+	})
+
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
 	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
 	for y := 0; y < h; y++ {
-		dy := y * dh / h
+		gy := y / maskGridDiv
 		for x := 0; x < w; x++ {
-			dx := x * dw / w
-			depth := float64(depthMap.GetDepth(dx, dy))
-			// A depth of 0 means no reading; treat it as background.
-			if depth == 0 || depth > maxDepthMM {
-				out.SetRGBA(x, y, white)
-			} else {
+			if foreground[gy*gw+x/maskGridDiv] {
 				out.Set(x, y, colorImg.At(bounds.Min.X+x, bounds.Min.Y+y))
+			} else {
+				out.SetRGBA(x, y, white)
 			}
 		}
 	}
 	return out
 }
 
-// NextPointCloud is unimplemented.
+// NextPointCloud is unimplemented; use the source camera directly.
 func (s *backgroundRemovalCamera) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
 	return nil, errors.New("point clouds are not supported")
 }
@@ -236,13 +266,10 @@ func (s *backgroundRemovalCamera) Geometries(ctx context.Context, extra map[stri
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
-//	{"command": "depth_stats"} - reports every named image the source camera
-//	serves (name, decoded type, whether it decodes as a depth map) and, for
-//	each depth-map candidate, statistics of its current frame (center value,
-//	non-zero min/median/max, percent with no reading). Use it to identify
-//	which source is the real depth stream (pin it with depth_source) and to
-//	calibrate max_depth_mm: stand at a known distance and compare the center
-//	value to deduce the depth units.
+//	{"command": "depth_stats"} - reports statistics of the source camera's
+//	current point cloud (size, min/median/max z) and whether intrinsics are
+//	available, for calibrating max_depth_mm and depth_scale. Stand at a
+//	known distance and compare the median z to deduce the units.
 func (s *backgroundRemovalCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -251,62 +278,39 @@ func (s *backgroundRemovalCamera) DoCommand(ctx context.Context, cmd map[string]
 
 	switch command {
 	case "depth_stats":
-		namedImages, _, err := s.srcCam.Images(ctx, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get images from source camera: %w", err)
+		resp := map[string]interface{}{}
+		if intrinsics, err := s.intrinsics(ctx); err != nil {
+			resp["intrinsics_error"] = err.Error()
+		} else {
+			resp["intrinsics"] = map[string]interface{}{
+				"width":  intrinsics.Width,
+				"height": intrinsics.Height,
+				"fx":     intrinsics.Fx,
+				"fy":     intrinsics.Fy,
+				"ppx":    intrinsics.Ppx,
+				"ppy":    intrinsics.Ppy,
+			}
 		}
 
-		sources := make([]interface{}, 0, len(namedImages))
-		for i := range namedImages {
-			entry := map[string]interface{}{"source": namedImages[i].SourceName}
-			img, err := namedImages[i].Image(ctx)
-			if err != nil {
-				entry["decode_error"] = err.Error()
-				sources = append(sources, entry)
-				continue
-			}
-			bounds := img.Bounds()
-			entry["type"] = fmt.Sprintf("%T", img)
-			entry["width"] = bounds.Dx()
-			entry["height"] = bounds.Dy()
-			if dm, err := rimage.ConvertImageToDepthMap(ctx, img); err == nil {
-				entry["is_depth_candidate"] = true
-				entry["stats"] = depthStats(dm)
-			} else {
-				entry["is_depth_candidate"] = false
-			}
-			sources = append(sources, entry)
+		pc, err := s.srcCam.NextPointCloud(ctx, nil)
+		if err != nil {
+			resp["point_cloud_error"] = err.Error()
+			return resp, nil
 		}
-		return map[string]interface{}{"sources": sources}, nil
+		var zs []float64
+		pc.Iterate(0, 0, func(p r3.Vector, _ pointcloud.Data) bool {
+			zs = append(zs, p.Z)
+			return true
+		})
+		resp["point_count"] = len(zs)
+		if len(zs) > 0 {
+			sort.Float64s(zs)
+			resp["min_z"] = zs[0]
+			resp["median_z"] = zs[len(zs)/2]
+			resp["max_z"] = zs[len(zs)-1]
+		}
+		return resp, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
-}
-
-// depthStats summarizes a depth frame's values.
-func depthStats(depthMap *rimage.DepthMap) map[string]interface{} {
-	w, h := depthMap.Width(), depthMap.Height()
-	var nonZero []float64
-	zeros := 0
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			d := float64(depthMap.GetDepth(x, y))
-			if d == 0 {
-				zeros++
-			} else {
-				nonZero = append(nonZero, d)
-			}
-		}
-	}
-	stats := map[string]interface{}{
-		"center_value": float64(depthMap.GetDepth(w/2, h/2)),
-		"percent_zero": 100 * float64(zeros) / float64(w*h),
-	}
-	if len(nonZero) > 0 {
-		sort.Float64s(nonZero)
-		stats["min_nonzero"] = nonZero[0]
-		stats["median_nonzero"] = nonZero[len(nonZero)/2]
-		stats["max"] = nonZero[len(nonZero)-1]
-	}
-	return stats
 }
