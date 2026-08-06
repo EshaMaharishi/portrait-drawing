@@ -32,8 +32,6 @@ import (
 var Model = resource.NewModel("esha", "portrait-drawing", "image-to-poses")
 
 const (
-	// defaultImagePath is used when the image_path attribute is not set.
-	defaultImagePath = "image.png"
 	// defaultSizeMM is the width and height in millimeters of the area the
 	// image is mapped onto when size_x_mm/size_y_mm are not set (254mm = 10in).
 	defaultSizeMM = 254.0
@@ -53,9 +51,12 @@ func init() {
 
 // Config describes the attributes for this camera.
 type Config struct {
-	// ImagePath is the path to the PNG file to convert; defaults to
-	// "image.png" relative to the module's working directory.
+	// ImagePath is the path to the PNG file to convert. Exactly one of
+	// ImagePath and Camera is required.
 	ImagePath string `json:"image_path"`
+	// Camera is the name of a camera whose image is converted instead of a
+	// file. Exactly one of ImagePath and Camera is required.
+	Camera string `json:"camera"`
 	// TopLeftXMM and TopLeftYMM are the position in millimeters of the
 	// top-left corner of the drawing area; the image's [x, y] coordinates
 	// (origin at the image's top-left) are offset by them. Required.
@@ -83,6 +84,12 @@ type Config struct {
 
 // Validate ensures the config is valid.
 func (c *Config) Validate(path string) ([]string, []string, error) {
+	if c.ImagePath == "" && c.Camera == "" {
+		return nil, nil, fmt.Errorf(`%s: exactly one of "image_path" or "camera" is required`, path)
+	}
+	if c.ImagePath != "" && c.Camera != "" {
+		return nil, nil, fmt.Errorf(`%s: set only one of "image_path" and "camera"`, path)
+	}
 	if c.TopLeftXMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_x_mm")
 	}
@@ -110,7 +117,11 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if *c.HoverAboveMM < 0 {
 		return nil, nil, fmt.Errorf("hover_above_mm must be non-negative, got %v", *c.HoverAboveMM)
 	}
-	return []string{c.Surface}, nil, nil
+	deps := []string{c.Surface}
+	if c.Camera != "" {
+		deps = append(deps, c.Camera)
+	}
+	return deps, nil, nil
 }
 
 type imageToPosesCamera struct {
@@ -120,6 +131,9 @@ type imageToPosesCamera struct {
 
 	logger    logging.Logger
 	imagePath string
+	// srcCam is the camera the image is read from; nil when image_path is
+	// configured instead.
+	srcCam    camera.Camera
 	xMM       float64
 	yMM       float64
 	sizeXMM   float64
@@ -149,9 +163,12 @@ func newImageToPoses(
 	if err != nil {
 		return nil, err
 	}
-	imagePath := cfg.ImagePath
-	if imagePath == "" {
-		imagePath = defaultImagePath
+	var srcCam camera.Camera
+	if cfg.Camera != "" {
+		srcCam, err = camera.FromDependencies(deps, cfg.Camera)
+		if err != nil {
+			return nil, err
+		}
 	}
 	sizeXMM := cfg.SizeXMM
 	if sizeXMM == 0 {
@@ -170,7 +187,8 @@ func newImageToPoses(
 	return &imageToPosesCamera{
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
-		imagePath: imagePath,
+		imagePath: cfg.ImagePath,
+		srcCam:    srcCam,
 		xMM:       *cfg.TopLeftXMM,
 		yMM:       *cfg.TopLeftYMM,
 		sizeXMM:   sizeXMM,
@@ -179,6 +197,30 @@ func newImageToPoses(
 		hoverMM:   *cfg.HoverAboveMM,
 		surface:   surface,
 	}, nil
+}
+
+// sourceImage returns the image to convert - read from the configured
+// camera, or decoded from the configured PNG file - along with a description
+// of the source for logging.
+func (s *imageToPosesCamera) sourceImage(ctx context.Context) (image.Image, string, error) {
+	if s.srcCam != nil {
+		img, err := camera.DecodeImageFromCamera(ctx, s.srcCam, nil, nil)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to get image from camera: %w", err)
+		}
+		return img, "camera image", nil
+	}
+
+	f, err := os.Open(s.imagePath)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to open %s: %w", s.imagePath, err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
+	}
+	return img, s.imagePath, nil
 }
 
 // surfacePlane fetches the drawing surface's plane coefficients from the
@@ -259,13 +301,14 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]in
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
-//	{"command": "generate"} - reads the configured PNG file and returns the
-//	dark cells of a point_spacing_mm grid as poses over a size_x_mm x
-//	size_y_mm drawing area, caching them for the pose executor and the
-//	preview image. Once a set of poses is cached, generate returns it without
-//	recomputing, unless "threshold" (0-255, default 128) or
-//	"point_spacing_mm" overrides are passed, or the surface calibration has
-//	changed, either of which forces a regeneration. Each pose has x and y in
+//	{"command": "generate"} - reads the configured PNG file or camera image
+//	and returns the dark cells of a point_spacing_mm grid as poses over a
+//	size_x_mm x size_y_mm drawing area, caching them for the pose executor
+//	and the preview image. Once a set of poses is cached, generate returns it
+//	without recomputing, unless "threshold" (0-255, default 128) or
+//	"point_spacing_mm" overrides are passed, "force": true is passed (useful
+//	to re-grab a camera image), or the surface calibration has changed, any
+//	of which forces a regeneration. Each pose has x and y in
 //	millimeters offset by the configured top_left_x_mm and top_left_y_mm
 //	attributes (the area's top-left corner), z evaluated at that x/y from the
 //	surface service's calibrated plane, and an orientation vector pointing
@@ -298,6 +341,9 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 			spacingMM = sp
 			overridden = true
 		}
+		if force, ok := cmd["force"].(bool); ok && force {
+			overridden = true
+		}
 
 		plane, err := s.surfacePlane(ctx)
 		if err != nil {
@@ -313,20 +359,14 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 			return s.posesResponse(cached, cachedSpacingMM), nil
 		}
 
-		f, err := os.Open(s.imagePath)
+		img, source, err := s.sourceImage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to open %s: %w", s.imagePath, err)
-		}
-		defer f.Close()
-
-		img, err := png.Decode(f)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
+			return nil, err
 		}
 
 		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM)
 		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area at %.1fmm spacing",
-			s.imagePath, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
+			source, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
 		poses := make([]spatialmath.Pose, 0, len(points)*2)
