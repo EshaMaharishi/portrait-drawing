@@ -47,6 +47,10 @@ type Config struct {
 	// map is used as depth and the first that does not as color.
 	DepthSource string `json:"depth_source"`
 	ColorSource string `json:"color_source"`
+	// DepthScale converts the depth frame's raw values to millimeters:
+	// mm = raw * depth_scale. Defaults to 1 (values already in mm). Set to
+	// 1000 for a camera that reports meters.
+	DepthScale float64 `json:"depth_scale"`
 }
 
 // Validate ensures the config is valid; camera and max_depth_mm are required.
@@ -60,6 +64,9 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if *c.MaxDepthMM <= 0 {
 		return nil, nil, fmt.Errorf("max_depth_mm must be positive, got %v", *c.MaxDepthMM)
 	}
+	if c.DepthScale < 0 {
+		return nil, nil, fmt.Errorf("depth_scale must be positive, got %v", c.DepthScale)
+	}
 	return []string{c.Camera}, nil, nil
 }
 
@@ -71,6 +78,7 @@ type backgroundRemovalCamera struct {
 	logger      logging.Logger
 	srcCam      camera.Camera
 	maxDepthMM  float64
+	depthScale  float64
 	depthSource string
 	colorSource string
 }
@@ -89,11 +97,16 @@ func newBackgroundRemoval(
 	if err != nil {
 		return nil, err
 	}
+	depthScale := cfg.DepthScale
+	if depthScale == 0 {
+		depthScale = 1
+	}
 	return &backgroundRemovalCamera{
 		Named:       conf.ResourceName().AsNamed(),
 		logger:      logger,
 		srcCam:      srcCam,
 		maxDepthMM:  *cfg.MaxDepthMM,
+		depthScale:  depthScale,
 		depthSource: cfg.DepthSource,
 		colorSource: cfg.ColorSource,
 	}, nil
@@ -116,7 +129,7 @@ func (s *backgroundRemovalCamera) Images(
 		return nil, resource.ResponseMetadata{}, err
 	}
 
-	masked := maskByDepth(colorImg, depthMap, s.maxDepthMM)
+	masked := maskByDepth(colorImg, depthMap, s.maxDepthMM/s.depthScale)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, masked); err != nil {
 		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to encode masked image: %w", err)
