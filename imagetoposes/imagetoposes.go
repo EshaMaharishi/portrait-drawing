@@ -224,16 +224,17 @@ func newImageToPoses(
 	}, nil
 }
 
-// sourceImage returns the image to convert - read from the configured
-// camera, or decoded from the configured PNG file, then rotated by
-// rotate_degrees - along with a description of the source for logging.
+// sourceImage returns the un-rotated image to convert - read from the
+// configured camera, or decoded from the configured PNG file - along with a
+// description of the source for logging. Callers that need the drawing
+// orientation apply rotate_degrees via rotateImage.
 func (s *imageToPosesCamera) sourceImage(ctx context.Context) (image.Image, string, error) {
 	if s.srcCam != nil {
 		img, err := camera.DecodeImageFromCamera(ctx, s.srcCam, nil, nil)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to get image from camera: %w", err)
 		}
-		return rotateImage(img, s.rotateDeg), "camera image", nil
+		return img, "camera image", nil
 	}
 
 	f, err := os.Open(s.imagePath)
@@ -245,7 +246,7 @@ func (s *imageToPosesCamera) sourceImage(ctx context.Context) (image.Image, stri
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to decode %s as PNG: %w", s.imagePath, err)
 	}
-	return rotateImage(img, s.rotateDeg), s.imagePath, nil
+	return img, s.imagePath, nil
 }
 
 // rotateImage rotates the image clockwise by the given degrees, which must
@@ -307,7 +308,8 @@ func (s *imageToPosesCamera) surfacePlane(ctx context.Context) ([3]float64, erro
 // Images returns a preview of the XY points the get_poses command would
 // produce with the configured attributes, computed fresh from the source
 // image on every call: one black dot per point on a white canvas the size of
-// the drawing area.
+// the drawing area. The preview is not rotated by rotate_degrees; it shows
+// the source image's own orientation.
 func (s *imageToPosesCamera) Images(
 	ctx context.Context,
 	filterSourceNames []string,
@@ -395,6 +397,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		if err != nil {
 			return nil, err
 		}
+		img = rotateImage(img, s.rotateDeg)
 
 		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM)
 		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area at %.1fmm spacing",
