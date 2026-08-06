@@ -86,6 +86,12 @@ type Config struct {
 	// additional pose is generated this many millimeters above it. Set to 0
 	// to disable the hover poses. Required.
 	HoverAboveMM *float64 `json:"hover_above_mm"`
+	// MaxHoverTravelMM guards long traverses: when the XY distance from one
+	// point to the next exceeds it, an extra hover pose above the next point
+	// is inserted and marked linear, so the arm crosses the gap flat at
+	// hover height instead of arcing. 0 (the default) disables it. Only
+	// applies when hover_above_mm is non-zero.
+	MaxHoverTravelMM float64 `json:"max_hover_travel_mm"`
 }
 
 // Validate ensures the config is valid.
@@ -125,6 +131,9 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	default:
 		return nil, nil, fmt.Errorf("rotate_degrees must be 0, 90, 180, or 270, got %v", c.RotateDegrees)
 	}
+	if c.MaxHoverTravelMM < 0 {
+		return nil, nil, fmt.Errorf("max_hover_travel_mm must be non-negative, got %v", c.MaxHoverTravelMM)
+	}
 	if c.HoverAboveMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "hover_above_mm")
 	}
@@ -147,15 +156,16 @@ type imageToPosesCamera struct {
 	imagePath string
 	// srcCam is the camera the image is read from; nil when image_path is
 	// configured instead.
-	srcCam    camera.Camera
-	xMM       float64
-	yMM       float64
-	sizeXMM   float64
-	sizeYMM   float64
-	spacingMM float64
-	threshold uint8
-	hoverMM   float64
-	rotateDeg int
+	srcCam      camera.Camera
+	xMM         float64
+	yMM         float64
+	sizeXMM     float64
+	sizeYMM     float64
+	spacingMM   float64
+	threshold   uint8
+	hoverMM     float64
+	maxTravelMM float64
+	rotateDeg   int
 	// surface is the table-surface calibration service; its get_plane
 	// command provides the drawing surface's plane.
 	surface resource.Resource
@@ -197,19 +207,20 @@ func newImageToPoses(
 	}
 
 	return &imageToPosesCamera{
-		Named:     conf.ResourceName().AsNamed(),
-		logger:    logger,
-		imagePath: cfg.ImagePath,
-		srcCam:    srcCam,
-		xMM:       *cfg.TopLeftXMM,
-		yMM:       *cfg.TopLeftYMM,
-		sizeXMM:   sizeXMM,
-		sizeYMM:   sizeYMM,
-		spacingMM: *cfg.PointSpacingMM,
-		threshold: threshold,
-		hoverMM:   *cfg.HoverAboveMM,
-		rotateDeg: int(cfg.RotateDegrees),
-		surface:   surface,
+		Named:       conf.ResourceName().AsNamed(),
+		logger:      logger,
+		imagePath:   cfg.ImagePath,
+		srcCam:      srcCam,
+		xMM:         *cfg.TopLeftXMM,
+		yMM:         *cfg.TopLeftYMM,
+		sizeXMM:     sizeXMM,
+		sizeYMM:     sizeYMM,
+		spacingMM:   *cfg.PointSpacingMM,
+		threshold:   threshold,
+		hoverMM:     *cfg.HoverAboveMM,
+		maxTravelMM: cfg.MaxHoverTravelMM,
+		rotateDeg:   int(cfg.RotateDegrees),
+		surface:     surface,
 	}, nil
 }
 
@@ -390,14 +401,26 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 			source, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
-		poses := make([]spatialmath.Pose, 0, len(points)*2)
-		for _, p := range points {
+		poses := make([]poseEntry, 0, len(points)*2)
+		var prevX, prevY float64
+		for i, p := range points {
 			x, y := s.xMM+p[0], s.yMM+p[1]
 			z := plane[0]*x + plane[1]*y + plane[2]
-			poses = append(poses, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z}, downward))
-			if s.hoverMM > 0 {
-				poses = append(poses, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward))
+			// Guard long traverses: cross to above the next point flat at
+			// hover height, on a straight (linear-constrained) path, before
+			// descending.
+			if s.hoverMM > 0 && s.maxTravelMM > 0 && i > 0 &&
+				math.Hypot(x-prevX, y-prevY) > s.maxTravelMM {
+				poses = append(poses, poseEntry{
+					pose:   spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward),
+					linear: true,
+				})
 			}
+			poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z}, downward)})
+			if s.hoverMM > 0 {
+				poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward)})
+			}
+			prevX, prevY = x, y
 		}
 
 		return s.posesResponse(poses, spacingMM), nil
@@ -406,19 +429,27 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 	}
 }
 
+// poseEntry is a pose in the drawing sequence; linear marks poses that
+// should be reached on a straight-line (linear-constrained) path.
+type poseEntry struct {
+	pose   spatialmath.Pose
+	linear bool
+}
+
 // posesResponse builds the get_poses response for a set of poses.
-func (s *imageToPosesCamera) posesResponse(poses []spatialmath.Pose, spacingMM float64) map[string]interface{} {
+func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64) map[string]interface{} {
 	out := make([]interface{}, len(poses))
-	for i, pose := range poses {
-		pt := pose.Point()
+	for i, entry := range poses {
+		pt := entry.pose.Point()
 		out[i] = map[string]interface{}{
-			"x":     pt.X,
-			"y":     pt.Y,
-			"z":     pt.Z,
-			"o_x":   0.0,
-			"o_y":   0.0,
-			"o_z":   -1.0,
-			"theta": 0.0,
+			"x":      pt.X,
+			"y":      pt.Y,
+			"z":      pt.Z,
+			"o_x":    0.0,
+			"o_y":    0.0,
+			"o_z":    -1.0,
+			"theta":  0.0,
+			"linear": entry.linear,
 		}
 	}
 	return map[string]interface{}{

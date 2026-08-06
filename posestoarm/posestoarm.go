@@ -12,12 +12,27 @@ import (
 
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
 )
+
+// Tolerances for linear-constrained moves: how far the arm may deviate from
+// the straight-line path and orientation while crossing at hover height.
+const (
+	linearLineToleranceMM          = 2.0
+	linearOrientationToleranceDegs = 5.0
+)
+
+// drawPose is one pose in the drawing sequence; linear marks poses that
+// should be reached on a straight-line-constrained path.
+type drawPose struct {
+	pose   spatialmath.Pose
+	linear bool
+}
 
 // Model is the full model triplet for this service.
 var Model = resource.NewModel("esha", "portrait-drawing", "poses-to-arm")
@@ -134,10 +149,19 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 					"total":     len(poses),
 				}, nil
 			}
-			if _, err := s.motion.Move(drawCtx, motion.MoveReq{
+			req := motion.MoveReq{
 				ComponentName: s.armName,
-				Destination:   referenceframe.NewPoseInFrame(referenceframe.World, pose),
-			}); err != nil {
+				Destination:   referenceframe.NewPoseInFrame(referenceframe.World, pose.pose),
+			}
+			if pose.linear {
+				req.Constraints = &motionplan.Constraints{
+					LinearConstraint: []motionplan.LinearConstraint{{
+						LineToleranceMm:          linearLineToleranceMM,
+						OrientationToleranceDegs: linearOrientationToleranceDegs,
+					}},
+				}
+			}
+			if _, err := s.motion.Move(drawCtx, req); err != nil {
 				if drawCtx.Err() != nil {
 					s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
 					return map[string]interface{}{
@@ -184,7 +208,7 @@ func (s *posesToArm) Close(ctx context.Context) error {
 }
 
 // fetchPoses gets the poses from the camera's get_poses command.
-func (s *posesToArm) fetchPoses(ctx context.Context) ([]spatialmath.Pose, error) {
+func (s *posesToArm) fetchPoses(ctx context.Context) ([]drawPose, error) {
 	resp, err := s.cam.DoCommand(ctx, map[string]interface{}{"command": "get_poses"})
 	if err != nil {
 		return nil, fmt.Errorf("camera get_poses command failed: %w", err)
@@ -197,21 +221,25 @@ func (s *posesToArm) fetchPoses(ctx context.Context) ([]spatialmath.Pose, error)
 		return nil, errors.New("camera generated no poses")
 	}
 
-	poses := make([]spatialmath.Pose, len(rawPoses))
+	poses := make([]drawPose, len(rawPoses))
 	for i, raw := range rawPoses {
 		p, ok := raw.(map[string]interface{})
 		if !ok {
 			return nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
 		}
-		poses[i] = spatialmath.NewPose(
-			r3.Vector{X: asFloat(p["x"]), Y: asFloat(p["y"]), Z: asFloat(p["z"])},
-			&spatialmath.OrientationVectorDegrees{
-				OX:    asFloat(p["o_x"]),
-				OY:    asFloat(p["o_y"]),
-				OZ:    asFloat(p["o_z"]),
-				Theta: asFloat(p["theta"]),
-			},
-		)
+		linear, _ := p["linear"].(bool)
+		poses[i] = drawPose{
+			pose: spatialmath.NewPose(
+				r3.Vector{X: asFloat(p["x"]), Y: asFloat(p["y"]), Z: asFloat(p["z"])},
+				&spatialmath.OrientationVectorDegrees{
+					OX:    asFloat(p["o_x"]),
+					OY:    asFloat(p["o_y"]),
+					OZ:    asFloat(p["o_z"]),
+					Theta: asFloat(p["theta"]),
+				},
+			),
+			linear: linear,
+		}
 	}
 	return poses, nil
 }
