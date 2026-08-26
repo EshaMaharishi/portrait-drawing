@@ -242,7 +242,7 @@ func (s *posesToArm) finish(state string, completed, total int, err error) {
 func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{}) {
 	finish := s.finish
 
-	poses, _, err := s.fetchPoses(ctx, posesCmd)
+	poses, darknessLevels, err := s.fetchPoses(ctx, posesCmd)
 	if err != nil {
 		if ctx.Err() != nil {
 			finish(stateStopped, 0, 0, nil)
@@ -290,6 +290,8 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{
 		if (i+1)%100 == 0 {
 			s.logger.Infof("drew %d of %d poses", i+1, len(poses))
 		}
+		sleepDuration := 0.5 * darknessLevels[i] * float64(time.Second)
+		time.Sleep(time.Duration(sleepDuration))
 	}
 
 	s.logger.Infof("drawing complete: %d poses", len(poses))
