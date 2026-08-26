@@ -1,8 +1,8 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "esha:portrait-drawing",
-  "visibility": "private",
-  "url": "",
+  "module_id": "chess-piece-detection:portrait-drawing",
+  "visibility": "unlisted",
+  "url": "https://github.com/EshaMaharishi/portrait-drawing",
   "description": "A Viam module for drawing an image with an arm: converts an image into poses, moves an arm through them, and shows them in the visualizer.",
   "models": [
     {
