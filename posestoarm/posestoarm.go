@@ -64,6 +64,16 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	return []string{c.Camera, c.Arm, motion.Named("builtin").String()}, nil, nil
 }
 
+// Draw states reported by the status command.
+const (
+	stateIdle     = "idle"
+	stateFetching = "fetching"
+	stateDrawing  = "drawing"
+	stateStopped  = "stopped"
+	stateComplete = "complete"
+	stateError    = "error"
+)
+
 type posesToArm struct {
 	resource.Named
 	resource.AlwaysRebuild
@@ -73,11 +83,15 @@ type posesToArm struct {
 	armName string
 	motion  motion.Service
 
-	// mu guards drawCancel, which is non-nil while a draw is in progress and
-	// cancels it.
+	// mu guards the fields below. drawCancel is non-nil while a draw is in
+	// progress and cancels it; the rest describe the current or last draw.
 	mu         sync.Mutex
 	drawCancel context.CancelFunc
 	drawWG     sync.WaitGroup
+	drawState  string
+	completed  int
+	total      int
+	lastErr    string
 }
 
 func newPosesToArm(
@@ -99,22 +113,28 @@ func newPosesToArm(
 		return nil, err
 	}
 	return &posesToArm{
-		Named:   conf.ResourceName().AsNamed(),
-		logger:  logger,
-		cam:     cam,
-		armName: cfg.Arm,
-		motion:  motionSvc,
+		Named:     conf.ResourceName().AsNamed(),
+		logger:    logger,
+		cam:       cam,
+		armName:   cfg.Arm,
+		motion:    motionSvc,
+		drawState: stateIdle,
 	}, nil
 }
 
 // DoCommand handles arbitrary commands. Supported commands:
 //
 //	{"command": "draw"} - fetches the poses from the image-to-poses camera's
-//	get_poses command and moves the configured arm through them in the
-//	background, using the motion service. Returns as soon as the draw has
-//	started; the draw keeps running after this request completes. Only one
-//	draw may run at a time.
+//	get_poses command and moves the configured arm through them, using the
+//	motion service. Optional "threshold" and "point_spacing_mm" are forwarded
+//	to get_poses as overrides. The draw runs in the background and this
+//	command returns immediately with {"status": "started"}; poll "status" for
+//	progress. Only one draw may run at a time.
 //	{"command": "stop"} - cancels the in-progress draw, if any.
+//	{"command": "status"} - returns the state of the current or last draw:
+//	"state" (idle, fetching, drawing, stopped, complete, or error),
+//	"completed" and "total" pose counts, and "error" (empty unless state is
+//	error).
 func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -123,37 +143,31 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 
 	switch command {
 	case "draw":
-		poses, err := s.fetchPoses(ctx)
-		if err != nil {
-			return nil, err
-		}
-
 		s.mu.Lock()
 		if s.drawCancel != nil {
 			s.mu.Unlock()
 			return nil, errors.New(`a draw is already in progress; send the "stop" command to cancel it`)
 		}
-
-		// Detached from the request context so drawing outlives this request.
+		// The draw outlives this request, so it must not inherit ctx.
 		drawCtx, cancel := context.WithCancel(context.Background())
 		s.drawCancel = cancel
+		s.drawState = stateFetching
+		s.completed = 0
+		s.total = 0
+		s.lastErr = ""
 		s.mu.Unlock()
-		s.drawWG.Go(func() {
-			defer func() {
-				s.mu.Lock()
-				s.drawCancel = nil
-				s.mu.Unlock()
-				cancel()
-				s.drawWG.Done()
-			}()
-			s.runDraw(drawCtx, poses)
-		})
 
-		return map[string]interface{}{
-			"status": "drawing started",
-			"total":  len(poses),
-		}, nil
+		// Forward the get_poses overrides, if given.
+		posesCmd := map[string]interface{}{"command": "get_poses"}
+		for _, key := range []string{"threshold", "point_spacing_mm"} {
+			if v, ok := cmd[key]; ok {
+				posesCmd[key] = v
+			}
+		}
 
+		s.drawWG.Add(1)
+		go s.runDraw(drawCtx, cancel, posesCmd)
+		return map[string]interface{}{"status": "started"}, nil
 	case "stop":
 		s.mu.Lock()
 		cancel := s.drawCancel
@@ -162,20 +176,66 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 			return map[string]interface{}{"status": "no draw in progress"}, nil
 		}
 		cancel()
-		// Wait without holding mu: the draw goroutine takes it to clear
-		// drawCancel before it signals drawWG.
+		// Wait (without holding mu, which the draw goroutine needs to exit)
+		// so the arm has actually stopped when this returns.
 		s.drawWG.Wait()
-		return map[string]interface{}{"status": "stop requested"}, nil
+		return map[string]interface{}{"status": "stopped"}, nil
+	case "status":
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return map[string]interface{}{
+			"state":     s.drawState,
+			"completed": s.completed,
+			"total":     s.total,
+			"error":     s.lastErr,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
 }
 
-// runDraw moves the arm through the poses until done or drawCtx is canceled.
-func (s *posesToArm) runDraw(drawCtx context.Context, poses []drawPose) {
+// runDraw fetches the poses and moves the arm through them, recording
+// progress in the service's state until it finishes, fails, or is cancelled.
+func (s *posesToArm) runDraw(ctx context.Context, cancel context.CancelFunc, posesCmd map[string]interface{}) {
+	defer func() {
+		s.mu.Lock()
+		s.drawCancel = nil
+		s.mu.Unlock()
+		cancel()
+		s.drawWG.Done()
+	}()
+
+	finish := func(state string, completed, total int, err error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.drawState = state
+		s.completed = completed
+		s.total = total
+		if err != nil {
+			s.lastErr = err.Error()
+			s.logger.Errorw("draw failed", "error", err)
+		}
+	}
+
+	poses, err := s.fetchPoses(ctx, posesCmd)
+	if err != nil {
+		if ctx.Err() != nil {
+			finish(stateStopped, 0, 0, nil)
+			return
+		}
+		finish(stateError, 0, 0, err)
+		return
+	}
+
+	s.mu.Lock()
+	s.drawState = stateDrawing
+	s.total = len(poses)
+	s.mu.Unlock()
+
 	for i, pose := range poses {
-		if drawCtx.Err() != nil {
+		if ctx.Err() != nil {
 			s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
+			finish(stateStopped, i, len(poses), nil)
 			return
 		}
 		req := motion.MoveReq{
@@ -190,36 +250,31 @@ func (s *posesToArm) runDraw(drawCtx context.Context, poses []drawPose) {
 				}},
 			}
 		}
-		if _, err := s.motion.Move(drawCtx, req); err != nil {
-			if drawCtx.Err() != nil {
+		if _, err := s.motion.Move(ctx, req); err != nil {
+			if ctx.Err() != nil {
 				s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
+				finish(stateStopped, i, len(poses), nil)
 				return
 			}
-			s.logger.Errorf("failed to move to pose %d of %d: %v", i+1, len(poses), err)
+			finish(stateError, i, len(poses), fmt.Errorf("failed to move to pose %d of %d: %w", i+1, len(poses), err))
 			return
 		}
+		s.mu.Lock()
+		s.completed = i + 1
+		s.mu.Unlock()
 		if (i+1)%100 == 0 {
 			s.logger.Infof("drew %d of %d poses", i+1, len(poses))
 		}
 	}
+
 	s.logger.Infof("drawing complete: %d poses", len(poses))
+	finish(stateComplete, len(poses), len(poses), nil)
 }
 
-// Close cancels any in-progress draw and waits for it to finish.
-func (s *posesToArm) Close(ctx context.Context) error {
-	s.mu.Lock()
-	cancel := s.drawCancel
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	s.drawWG.Wait()
-	return nil
-}
-
-// fetchPoses gets the poses from the camera's get_poses command.
-func (s *posesToArm) fetchPoses(ctx context.Context) ([]drawPose, error) {
-	resp, err := s.cam.DoCommand(ctx, map[string]interface{}{"command": "get_poses"})
+// fetchPoses gets the poses from the camera by sending it posesCmd, a
+// get_poses command with any overrides.
+func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]interface{}) ([]drawPose, error) {
+	resp, err := s.cam.DoCommand(ctx, posesCmd)
 	if err != nil {
 		return nil, fmt.Errorf("camera get_poses command failed: %w", err)
 	}
@@ -257,4 +312,16 @@ func (s *posesToArm) fetchPoses(ctx context.Context) ([]drawPose, error) {
 func asFloat(v interface{}) float64 {
 	f, _ := v.(float64)
 	return f
+}
+
+// Close cancels any in-progress draw and waits for it to finish.
+func (s *posesToArm) Close(ctx context.Context) error {
+	s.mu.Lock()
+	cancel := s.drawCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.drawWG.Wait()
+	return nil
 }
