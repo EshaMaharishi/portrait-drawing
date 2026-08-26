@@ -1,7 +1,7 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "chess-piece-detection:portrait-drawing",
-  "visibility": "unlisted",
+  "visibility": "public",
   "url": "https://github.com/EshaMaharishi/portrait-drawing",
   "description": "A Viam module for drawing an image with an arm: converts an image into poses, moves an arm through them, and shows them in the visualizer.",
   "models": [
@@ -30,6 +30,24 @@
   "build": {
     "build": "make module.tar.gz",
     "path": "module.tar.gz",
-    "arch": ["linux/amd64", "linux/arm64", "darwin/arm64"]
-  }
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64"
+    ],
+    "setup": "make setup"
+  },
+  "applications": [
+    {
+      "name": "portrait-drawing",
+      "type": "single_machine",
+      "entrypoint": "dist/index.html",
+      "customizations": {
+        "machinePicker": {
+          "heading": "Portrait Drawing",
+          "subheading": "Pick the drawing robot"
+        }
+      }
+    }
+  ]
 }
