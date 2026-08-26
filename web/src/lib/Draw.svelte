@@ -3,7 +3,12 @@
   import { GenericServiceClient, WorldStateStoreClient } from '@viamrobotics/sdk'
   import { RESOURCES, doCommand, errorMessage, type DrawStatus, type VisualizeResult } from '../viam'
 
-  let { partID, threshold, spacingMM }: { partID: string; threshold: number; spacingMM: number } = $props()
+  let {
+    partID,
+    threshold,
+    spacingMM,
+    drawing = $bindable(false),
+  }: { partID: string; threshold: number; spacingMM: number; drawing?: boolean } = $props()
 
   const arm = createResourceClient(GenericServiceClient, () => partID, () => RESOURCES.posesToArm)
   const scene = createResourceClient(WorldStateStoreClient, () => partID, () => RESOURCES.scene)
@@ -14,6 +19,9 @@
   let error = $state('')
 
   const active = $derived(status.state === 'fetching' || status.state === 'drawing')
+  $effect(() => {
+    drawing = active
+  })
   const percent = $derived(status.total > 0 ? Math.round((100 * status.completed) / status.total) : 0)
 
   async function refreshStatus() {
@@ -37,7 +45,6 @@
 
   async function draw() {
     if (!arm.current) return
-    if (!confirm('Start drawing? The arm will move.')) return
     error = ''
     try {
       await doCommand(arm.current, { command: 'draw', threshold, point_spacing_mm: spacingMM })
@@ -107,7 +114,7 @@
     <div class="status">
       <span class="state">{status.state}</span>
       <span class="muted">
-        {#if status.total > 0}{status.completed} / {status.total} poses ({percent}%){:else}—{/if}
+        {#if status.state === 'fetching'}computing poses…{:else if status.total > 0}{status.completed} / {status.total} poses ({percent}%){:else}—{/if}
       </span>
     </div>
     {#if status.state === 'error' && status.error}<p class="error">Draw failed: {status.error}</p>{/if}

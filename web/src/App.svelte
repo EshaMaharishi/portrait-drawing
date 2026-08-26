@@ -13,6 +13,7 @@
   // Shared tuning values: Capture edits them, Draw uses them for visualize.
   let threshold = $state(235)
   let spacingMM = $state(1)
+  let drawing = $state(false)
 
   let host = $state('')
   let keyId = $state('')
@@ -34,8 +35,8 @@
       <h1>Portrait Drawing</h1>
       <ConnectionBadge partID={connection.machineId} dialConf={connection.dialConf} />
     </header>
-    <Capture partID={connection.machineId} bind:threshold bind:spacingMM />
-    <Draw partID={connection.machineId} {threshold} {spacingMM} />
+    <Capture partID={connection.machineId} bind:threshold bind:spacingMM locked={drawing} />
+    <Draw partID={connection.machineId} {threshold} {spacingMM} bind:drawing />
   </ViamProvider>
 {:else}
   <header><h1>Portrait Drawing</h1></header>

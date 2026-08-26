@@ -10,13 +10,6 @@ export const RESOURCES = {
   posesToArm: 'poses-to-arm',
 } as const
 
-export interface GetPosesResult {
-  count: number
-  size_x_mm: number
-  size_y_mm: number
-  point_spacing_mm: number
-}
-
 export interface DrawStatus {
   state: 'idle' | 'fetching' | 'drawing' | 'stopped' | 'complete' | 'error'
   completed: number
