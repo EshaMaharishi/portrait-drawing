@@ -129,7 +129,6 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 		}
 
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		if s.drawCancel != nil {
 			s.mu.Unlock()
 			return nil, errors.New(`a draw is already in progress; send the "stop" command to cancel it`)
@@ -138,6 +137,7 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 		// Detached from the request context so drawing outlives this request.
 		drawCtx, cancel := context.WithCancel(context.Background())
 		s.drawCancel = cancel
+		s.mu.Unlock()
 		s.drawWG.Go(func() {
 			defer func() {
 				s.mu.Lock()
@@ -156,12 +156,14 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 
 	case "stop":
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		cancel := s.drawCancel
+		s.mu.Unlock()
 		if cancel == nil {
 			return map[string]interface{}{"status": "no draw in progress"}, nil
 		}
 		cancel()
+		// Wait without holding mu: the draw goroutine takes it to clear
+		// drawCancel before it signals drawWG.
 		s.drawWG.Wait()
 		return map[string]interface{}{"status": "stop requested"}, nil
 	default:
