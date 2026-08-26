@@ -20,10 +20,6 @@
     {
       "api": "rdk:service:world_state_store",
       "model": "chess-piece-detection:portrait-drawing:poses-to-3d-scene"
-    },
-    {
-      "api": "rdk:service:generic",
-      "model": "chess-piece-detection:portrait-drawing:table-surface"
     }
   ],
   "entrypoint": "bin/portrait-drawing",

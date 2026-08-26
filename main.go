@@ -14,7 +14,6 @@ import (
 	"portrait-drawing/imagetoposes"
 	"portrait-drawing/posesto3dscene"
 	"portrait-drawing/posestoarm"
-	"portrait-drawing/tablesurface"
 )
 
 func main() {
@@ -23,6 +22,5 @@ func main() {
 		resource.APIModel{API: camera.API, Model: backgroundremoval.Model},
 		resource.APIModel{API: generic.API, Model: posestoarm.Model},
 		resource.APIModel{API: worldstatestore.API, Model: posesto3dscene.Model},
-		resource.APIModel{API: generic.API, Model: tablesurface.Model},
 	)
 }

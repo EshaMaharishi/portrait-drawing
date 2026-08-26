@@ -8,8 +8,7 @@ Viam-hosted web app to run it.
 | Model | API | Purpose |
 |---|---|---|
 | `background-removal` | camera | Source colour frame with everything beyond `max_depth_mm` painted white |
-| `image-to-poses` | camera | Turns an image into a dotted pen path; `GetImage` is a WYSIWYG preview, `get_poses` returns the poses |
-| `table-surface` | generic service | Calibrates the drawing plane from recorded touch points (`record_point`, `undo`, `clear`, `set_flat`, `status`, `get_plane`) |
+| `image-to-poses` | camera | Turns an image into a dotted pen path at the configured `surface_z_mm`; `GetImage` is a preview, `get_poses` returns the poses |
 | `poses-to-3d-scene` | world_state_store | `visualize` / `clear` the poses in the Viam visualizer |
 | `poses-to-arm` | generic service | `draw` (async), `stop`, `status` |
 

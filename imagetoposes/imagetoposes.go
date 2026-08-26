@@ -22,7 +22,6 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
@@ -61,10 +60,11 @@ type Config struct {
 	// (origin at the image's top-left) are offset by them. Required.
 	TopLeftXMM *float64 `json:"top_left_x_mm"`
 	TopLeftYMM *float64 `json:"top_left_y_mm"`
-	// Surface is the name of the table-surface calibration service that
-	// provides the drawing surface's plane; each pose's z is evaluated from
-	// that plane at its x/y. Required.
-	Surface string `json:"surface"`
+	// SurfaceZMM is the z position in millimeters (in the arm's world frame)
+	// of the drawing surface; every contact pose is generated at this height.
+	// Jog the arm until the pen touches the paper and use its end position's
+	// z. Required.
+	SurfaceZMM *float64 `json:"surface_z_mm"`
 	// SizeXMM and SizeYMM are the extent in millimeters of the drawing area
 	// along the x and y axes; the image is scaled to fit inside it, preserving
 	// aspect ratio, and centered. Both default to 254mm (10in).
@@ -113,8 +113,8 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.TopLeftYMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_y_mm")
 	}
-	if c.Surface == "" {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "surface")
+	if c.SurfaceZMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "surface_z_mm")
 	}
 	if c.SizeXMM < 0 {
 		return nil, nil, fmt.Errorf("size_x_mm must be positive, got %v", c.SizeXMM)
@@ -148,7 +148,7 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if *c.HoverAboveMM < 0 {
 		return nil, nil, fmt.Errorf("hover_above_mm must be non-negative, got %v", *c.HoverAboveMM)
 	}
-	deps := []string{c.Surface}
+	var deps []string
 	if c.Camera != "" {
 		deps = append(deps, c.Camera)
 	}
@@ -175,9 +175,7 @@ type imageToPosesCamera struct {
 	maxTravelMM float64
 	rotateDeg   int
 	denseN      int
-	// surface is the table-surface calibration service; its get_plane
-	// command provides the drawing surface's plane.
-	surface resource.Resource
+	surfaceZMM  float64
 }
 
 func newImageToPoses(
@@ -210,11 +208,6 @@ func newImageToPoses(
 		threshold = uint8(*cfg.Threshold)
 	}
 
-	surface, err := resource.FromDependencies[resource.Resource](deps, generic.Named(cfg.Surface))
-	if err != nil {
-		return nil, err
-	}
-
 	return &imageToPosesCamera{
 		Named:       conf.ResourceName().AsNamed(),
 		logger:      logger,
@@ -230,7 +223,7 @@ func newImageToPoses(
 		maxTravelMM: cfg.MaxHoverTravelMM,
 		rotateDeg:   int(cfg.RotateDegrees),
 		denseN:      int(cfg.DenseBlockSize),
-		surface:     surface,
+		surfaceZMM:  *cfg.SurfaceZMM,
 	}, nil
 }
 
@@ -310,24 +303,6 @@ func rotateImage(img image.Image, degrees int) image.Image {
 	return out
 }
 
-// surfacePlane fetches the drawing surface's plane coefficients from the
-// table-surface service, such that z = a*x + b*y + c.
-func (s *imageToPosesCamera) surfacePlane(ctx context.Context) ([3]float64, error) {
-	resp, err := s.surface.DoCommand(ctx, map[string]interface{}{"command": "get_plane"})
-	if err != nil {
-		return [3]float64{}, fmt.Errorf("failed to get plane from surface service: %w", err)
-	}
-	var plane [3]float64
-	for i, key := range []string{"a", "b", "c"} {
-		v, ok := resp[key].(float64)
-		if !ok {
-			return [3]float64{}, fmt.Errorf("surface service get_plane response is missing %q: %v", key, resp)
-		}
-		plane[i] = v
-	}
-	return plane, nil
-}
-
 // Images returns a preview of the XY points the get_poses command would
 // produce, computed fresh from the source image on every call: one black dot
 // per point on a white canvas the size of the drawing area. The image is
@@ -389,8 +364,8 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]in
 //	Optional "threshold" (0-255, default 128) and "point_spacing_mm" override
 //	the defaults for this call. Each pose has x and y in millimeters offset
 //	by the configured top_left_x_mm and top_left_y_mm attributes (the area's
-//	top-left corner), z evaluated at that x/y from the surface service's
-//	calibrated plane, and an orientation vector pointing straight down
+//	top-left corner), z at the configured surface_z_mm, and an orientation
+//	vector pointing straight down
 //	(0, 0, -1) with theta 0, suitable for use as a motion service Move
 //	destination. When hover_above_mm is non-zero, each point's pose is
 //	followed by an additional pose that far above it, so the pen lifts
@@ -405,11 +380,6 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 	switch command {
 	case "get_poses":
 		threshold, spacingMM, err := s.overrides(cmd)
-		if err != nil {
-			return nil, err
-		}
-
-		plane, err := s.surfacePlane(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -432,7 +402,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		var homeEntry *poseEntry
 		if s.hoverMM > 0 && len(points) > 0 {
 			x, y := s.xMM+points[0][0], s.yMM+points[0][1]
-			z := plane[0]*x + plane[1]*y + plane[2]
+			z := s.surfaceZMM
 			homeEntry = &poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + 10*s.hoverMM}, downward)}
 			poses = append(poses, *homeEntry)
 		}
@@ -440,7 +410,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		var prevX, prevY float64
 		for i, p := range points {
 			x, y := s.xMM+p[0], s.yMM+p[1]
-			z := plane[0]*x + plane[1]*y + plane[2]
+			z := s.surfaceZMM
 			// Guard long traverses: cross to above the next point flat at
 			// hover height, on a straight (linear-constrained) path, before
 			// descending.
