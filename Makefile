@@ -1,17 +1,20 @@
 BIN := bin/portrait-drawing
-ENTRYPOINT := dist/index.html
+ENTRYPOINT := web/dist/index.html
 
 .PHONY: build web module.tar.gz test clean setup
 
-build:
+# The Go binary embeds web/dist (web/server.go), so the web app must be
+# built first.
+build: $(ENTRYPOINT)
 	go build -o $(BIN) .
 
-# Build the web app into dist/ (served at viamapplications.com).
+# Build the web app into web/dist/ (served at viamapplications.com and
+# embedded in the binary for the local webapp component).
 web $(ENTRYPOINT): $(wildcard web/src/* web/src/lib/* web/*.ts web/*.html web/package.json)
 	cd web && npm ci && npm run build
 
 module.tar.gz: build $(ENTRYPOINT)
-	tar czf module.tar.gz $(BIN) meta.json dist
+	tar czf module.tar.gz $(BIN) meta.json web/dist
 
 # Install Node.js in the Viam cloud build environment (Debian, root) when it
 # is missing, so the web app can be built there.
@@ -23,8 +26,8 @@ setup:
 	fi
 	node --version && npm --version
 
-test:
+test: $(ENTRYPOINT)
 	go test ./...
 
 clean:
-	rm -rf bin dist module.tar.gz
+	rm -rf bin web/dist module.tar.gz

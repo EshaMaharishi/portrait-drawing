@@ -39,17 +39,28 @@ Without `local-app-testing` the app shows a form to enter host + API key manuall
 
 ### Build, package, publish
 
+Release with Viam's cloud builder so each platform gets a native binary (do **not** upload a
+locally built tarball as `--platform any`; a Mac-built binary won't run on the Linux machine):
+
 ```sh
-make module.tar.gz        # go build + npm ci + vite build -> bin/, dist/, module.tar.gz
-viam module upload --upload=module.tar.gz --platform=any --version=<semver>
+git push origin main
+viam module build start --version <semver> --ref <commit>
+viam module build list --id <build id>      # wait for linux/* to show Done
 ```
 
-The same tarball carries the module binary and the app (`meta.json` `applications`
-entry). Once uploaded the app is served at
+`make module.tar.gz` (npm ci + vite build -> web/dist/, then go build, which embeds web/dist)
+is what the builder runs, per `meta.json`'s `build` section; `make setup` installs Node there.
+The same tarball carries the module binary and the app (`meta.json` `applications` entry).
+Once uploaded the app is served at
 
     https://portrait-drawing_chess-piece-detection.viamapplications.com
 
 Viam Applications requires the module to be `visibility: public`. The Go binary in the
 tarball is therefore publicly downloadable.
 
-For the module binary alone (e.g. `viam module reload`) `make build` is enough.
+### Local server on the machine
+
+The module also provides a `chess-piece-detection:portrait-drawing:webapp` generic component that
+embeds `web/dist` and serves the same app on the machine's LAN at `http://<machine-ip>:8888`
+(configurable with a `port` attribute). Add it to the machine config to use the app without
+viamapplications.com.

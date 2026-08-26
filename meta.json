@@ -20,6 +20,10 @@
     {
       "api": "rdk:service:world_state_store",
       "model": "chess-piece-detection:portrait-drawing:poses-to-3d-scene"
+    },
+    {
+      "api": "rdk:component:generic",
+      "model": "chess-piece-detection:portrait-drawing:webapp"
     }
   ],
   "entrypoint": "bin/portrait-drawing",
@@ -37,7 +41,7 @@
     {
       "name": "portrait-drawing",
       "type": "single_machine",
-      "entrypoint": "dist/index.html",
+      "entrypoint": "web/dist/index.html",
       "customizations": {
         "machinePicker": {
           "heading": "Portrait Drawing",

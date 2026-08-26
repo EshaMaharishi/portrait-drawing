@@ -1,5 +1,5 @@
 bin/
-dist/
+web/dist/
 module.tar.gz
 image.png
 web/node_modules/
