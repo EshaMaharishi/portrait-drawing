@@ -128,8 +128,8 @@ func (s *posesTo3DScene) StreamTransformChanges(
 //
 //	{"command": "visualize"} - runs the camera's get_poses command and stores the
 //	returned poses as world-frame transforms for the visualizer. Optional
-//	"threshold" is forwarded to the camera, and "max_poses" (default 2000)
-//	caps how many poses are stored, sampled evenly.
+//	"threshold" and "point_spacing_mm" are forwarded to the camera, and
+//	"max_poses" (default 2000) caps how many poses are stored, sampled evenly.
 //	{"command": "clear"} - removes all stored transforms.
 func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
@@ -140,8 +140,10 @@ func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface
 	switch command {
 	case "visualize":
 		camCmd := map[string]interface{}{"command": "get_poses"}
-		if t, ok := cmd["threshold"]; ok {
-			camCmd["threshold"] = t
+		for _, key := range []string{"threshold", "point_spacing_mm"} {
+			if v, ok := cmd[key]; ok {
+				camCmd[key] = v
+			}
 		}
 		maxPoses := defaultMaxPoses
 		if m, ok := cmd["max_poses"].(float64); ok {

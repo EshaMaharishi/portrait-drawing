@@ -329,21 +329,27 @@ func (s *imageToPosesCamera) surfacePlane(ctx context.Context) ([3]float64, erro
 }
 
 // Images returns a preview of the XY points the get_poses command would
-// produce with the configured attributes, computed fresh from the source
-// image on every call: one black dot per point on a white canvas the size of
-// the drawing area. The preview is not rotated by rotate_degrees; it shows
-// the source image's own orientation.
+// produce, computed fresh from the source image on every call: one black dot
+// per point on a white canvas the size of the drawing area. The image is
+// rotated by rotate_degrees and mirrored exactly as get_poses does, so the
+// preview matches what the arm draws. Like get_poses, "threshold" and
+// "point_spacing_mm" in extra override the configured values for this call.
 func (s *imageToPosesCamera) Images(
 	ctx context.Context,
 	filterSourceNames []string,
 	extra map[string]interface{},
 ) ([]camera.NamedImage, resource.ResponseMetadata, error) {
+	threshold, spacingMM, err := s.overrides(extra)
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, err
+	}
 	img, _, err := s.sourceImage(ctx)
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-	points := imageToPoints(img, s.threshold, s.sizeXMM, s.sizeYMM, s.spacingMM, s.denseN)
-	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, s.spacingMM)
+	img = mirrorImage(rotateImage(img, s.rotateDeg))
+	points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM, s.denseN)
+	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, spacingMM)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, preview); err != nil {
 		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to encode preview image: %w", err)
@@ -397,19 +403,9 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 
 	switch command {
 	case "get_poses":
-		threshold := s.threshold
-		if t, ok := cmd["threshold"].(float64); ok {
-			if t < 0 || t > 255 {
-				return nil, fmt.Errorf("threshold must be between 0 and 255, got %v", t)
-			}
-			threshold = uint8(t)
-		}
-		spacingMM := s.spacingMM
-		if sp, ok := cmd["point_spacing_mm"].(float64); ok {
-			if sp <= 0 {
-				return nil, fmt.Errorf("point_spacing_mm must be positive, got %v", sp)
-			}
-			spacingMM = sp
+		threshold, spacingMM, err := s.overrides(cmd)
+		if err != nil {
+			return nil, err
 		}
 
 		plane, err := s.surfacePlane(ctx)
@@ -468,6 +464,27 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
+}
+
+// overrides returns the threshold and point spacing to use for one call:
+// the configured values unless m carries a valid "threshold" (0-255) or
+// "point_spacing_mm" (> 0) override.
+func (s *imageToPosesCamera) overrides(m map[string]interface{}) (uint8, float64, error) {
+	threshold := s.threshold
+	if t, ok := m["threshold"].(float64); ok {
+		if t < 0 || t > 255 {
+			return 0, 0, fmt.Errorf("threshold must be between 0 and 255, got %v", t)
+		}
+		threshold = uint8(t)
+	}
+	spacingMM := s.spacingMM
+	if sp, ok := m["point_spacing_mm"].(float64); ok {
+		if sp <= 0 {
+			return 0, 0, fmt.Errorf("point_spacing_mm must be positive, got %v", sp)
+		}
+		spacingMM = sp
+	}
+	return threshold, spacingMM, nil
 }
 
 // poseEntry is a pose in the drawing sequence; linear marks poses that
