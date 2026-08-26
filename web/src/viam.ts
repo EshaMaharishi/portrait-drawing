@@ -6,7 +6,6 @@ export const RESOURCES = {
   personOnly: 'person-only',
   sketched: 'sketched',
   imageToPoses: 'image-to-poses',
-  scene: 'poses-to-3d-scene',
   posesToArm: 'poses-to-arm',
 } as const
 
@@ -17,11 +16,6 @@ export interface DrawStatus {
   error: string
 }
 
-export interface VisualizeResult {
-  status: string
-  shown: number
-  total: number
-}
 
 type Commandable = Pick<Resource, 'doCommand'>
 

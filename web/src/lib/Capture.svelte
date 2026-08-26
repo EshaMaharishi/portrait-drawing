@@ -109,7 +109,7 @@
     {#if locked}<span class="muted">Sliders are locked while drawing.</span>{/if}
   </div>
   <p class="muted">
-    The sliders drive the dot preview, <em>Draw</em> and <em>Visualize in 3D</em>. The drawing area,
-    rotation and hover come from the <code>{RESOURCES.imageToPoses}</code> config.
+    The sliders drive the dot preview and <em>Draw</em>. The drawing area, rotation and hover come
+    from the <code>{RESOURCES.imageToPoses}</code> config.
   </p>
 </section>

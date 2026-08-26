@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createResourceClient } from '@viamrobotics/svelte-sdk'
-  import { GenericServiceClient, WorldStateStoreClient } from '@viamrobotics/sdk'
-  import { RESOURCES, doCommand, errorMessage, type DrawStatus, type VisualizeResult } from '../viam'
+  import { GenericServiceClient } from '@viamrobotics/sdk'
+  import { RESOURCES, doCommand, errorMessage, type DrawStatus } from '../viam'
 
   let {
     partID,
@@ -11,11 +11,8 @@
   }: { partID: string; threshold: number; spacingMM: number; drawing?: boolean } = $props()
 
   const arm = createResourceClient(GenericServiceClient, () => partID, () => RESOURCES.posesToArm)
-  const scene = createResourceClient(WorldStateStoreClient, () => partID, () => RESOURCES.scene)
 
   let status = $state<DrawStatus>({ state: 'idle', completed: 0, total: 0, error: '' })
-  let sceneResult = $state<VisualizeResult | undefined>()
-  let sceneBusy = $state(false)
   let error = $state('')
 
   const active = $derived(status.state === 'fetching' || status.state === 'drawing')
@@ -66,42 +63,10 @@
     await refreshStatus()
   }
 
-  async function visualize(clear = false) {
-    if (!scene.current) return
-    sceneBusy = true
-    error = ''
-    try {
-      if (clear) {
-        await doCommand(scene.current, { command: 'clear' })
-        sceneResult = undefined
-      } else {
-        sceneResult = await doCommand<VisualizeResult>(scene.current, {
-          command: 'visualize',
-          threshold,
-          point_spacing_mm: spacingMM,
-          max_poses: 2000,
-        })
-      }
-    } catch (err) {
-      error = errorMessage(err)
-    } finally {
-      sceneBusy = false
-    }
-  }
 </script>
 
 <section class="panel">
   <h2>Draw</h2>
-  <div class="row">
-    <button class="secondary" onclick={() => visualize()} disabled={sceneBusy || !scene.current}>
-      {sceneBusy ? 'Working…' : 'Visualize in 3D'}
-    </button>
-    <button class="secondary" onclick={() => visualize(true)} disabled={sceneBusy || !scene.current}>Clear 3D</button>
-    {#if sceneResult}
-      <span class="muted">showing {sceneResult.shown} of {sceneResult.total} poses in the visualizer</span>
-    {/if}
-  </div>
-
   <div class="row">
     <button class="big" onclick={draw} disabled={active || !arm.current}>
       {active ? 'Drawing…' : 'Draw'}
