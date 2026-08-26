@@ -28,7 +28,7 @@ import (
 )
 
 // Model is the full model triplet for this camera.
-var Model = resource.NewModel("esha", "portrait-drawing", "image-to-poses")
+var Model = resource.NewModel("chess-piece-detection", "portrait-drawing", "image-to-poses")
 
 const (
 	// defaultSizeMM is the width and height in millimeters of the area the

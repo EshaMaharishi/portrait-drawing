@@ -23,7 +23,7 @@ import (
 )
 
 // Model is the full model triplet for this service.
-var Model = resource.NewModel("esha", "portrait-drawing", "table-surface")
+var Model = resource.NewModel("chess-piece-detection", "portrait-drawing", "table-surface")
 
 func init() {
 	resource.RegisterService(generic.API, Model, resource.Registration[resource.Resource, *Config]{

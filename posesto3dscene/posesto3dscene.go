@@ -20,7 +20,7 @@ import (
 )
 
 // Model is the full model triplet for this service.
-var Model = resource.NewModel("esha", "portrait-drawing", "poses-to-3d-scene")
+var Model = resource.NewModel("chess-piece-detection", "portrait-drawing", "poses-to-3d-scene")
 
 const (
 	// defaultMaxPoses caps how many transforms are stored per draw so the

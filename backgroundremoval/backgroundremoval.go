@@ -28,7 +28,7 @@ import (
 )
 
 // Model is the full model triplet for this camera.
-var Model = resource.NewModel("esha", "portrait-drawing", "background-removal")
+var Model = resource.NewModel("chess-piece-detection", "portrait-drawing", "background-removal")
 
 // maskGridDiv is the downscale factor of the foreground mask grid relative
 // to the color image. Projected points splat into grid cells, so a coarser

@@ -35,7 +35,7 @@ type drawPose struct {
 }
 
 // Model is the full model triplet for this service.
-var Model = resource.NewModel("esha", "portrait-drawing", "poses-to-arm")
+var Model = resource.NewModel("chess-piece-detection", "portrait-drawing", "poses-to-arm")
 
 func init() {
 	resource.RegisterService(generic.API, Model, resource.Registration[resource.Resource, *Config]{

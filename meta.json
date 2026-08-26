@@ -7,23 +7,23 @@
   "models": [
     {
       "api": "rdk:component:camera",
-      "model": "esha:portrait-drawing:image-to-poses"
+      "model": "chess-piece-detection:portrait-drawing:image-to-poses"
     },
     {
       "api": "rdk:component:camera",
-      "model": "esha:portrait-drawing:background-removal"
+      "model": "chess-piece-detection:portrait-drawing:background-removal"
     },
     {
       "api": "rdk:service:generic",
-      "model": "esha:portrait-drawing:poses-to-arm"
+      "model": "chess-piece-detection:portrait-drawing:poses-to-arm"
     },
     {
       "api": "rdk:service:world_state_store",
-      "model": "esha:portrait-drawing:poses-to-3d-scene"
+      "model": "chess-piece-detection:portrait-drawing:poses-to-3d-scene"
     },
     {
       "api": "rdk:service:generic",
-      "model": "esha:portrait-drawing:table-surface"
+      "model": "chess-piece-detection:portrait-drawing:table-surface"
     }
   ],
   "entrypoint": "bin/portrait-drawing",
