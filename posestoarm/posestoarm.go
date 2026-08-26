@@ -77,6 +77,7 @@ type posesToArm struct {
 	// cancels it.
 	mu         sync.Mutex
 	drawCancel context.CancelFunc
+	drawWG     sync.WaitGroup
 }
 
 func newPosesToArm(
@@ -109,8 +110,10 @@ func newPosesToArm(
 // DoCommand handles arbitrary commands. Supported commands:
 //
 //	{"command": "draw"} - fetches the poses from the image-to-poses camera's
-//	get_poses command and moves the configured arm through them, using the
-//	motion service. Only one draw may run at a time.
+//	get_poses command and moves the configured arm through them in the
+//	background, using the motion service. Returns as soon as the draw has
+//	started; the draw keeps running after this request completes. Only one
+//	draw may run at a time.
 //	{"command": "stop"} - cancels the in-progress draw, if any.
 func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
@@ -126,77 +129,81 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 		}
 
 		s.mu.Lock()
+		defer s.mu.Unlock()
 		if s.drawCancel != nil {
 			s.mu.Unlock()
 			return nil, errors.New(`a draw is already in progress; send the "stop" command to cancel it`)
 		}
-		drawCtx, cancel := context.WithCancel(ctx)
-		s.drawCancel = cancel
-		s.mu.Unlock()
-		defer func() {
-			s.mu.Lock()
-			s.drawCancel = nil
-			s.mu.Unlock()
-			cancel()
-		}()
 
-		for i, pose := range poses {
-			if drawCtx.Err() != nil {
-				s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
-				return map[string]interface{}{
-					"status":    "stopped",
-					"completed": i,
-					"total":     len(poses),
-				}, nil
-			}
-			req := motion.MoveReq{
-				ComponentName: s.armName,
-				Destination:   referenceframe.NewPoseInFrame(referenceframe.World, pose.pose),
-			}
-			if pose.linear {
-				req.Constraints = &motionplan.Constraints{
-					LinearConstraint: []motionplan.LinearConstraint{{
-						LineToleranceMm:          linearLineToleranceMM,
-						OrientationToleranceDegs: linearOrientationToleranceDegs,
-					}},
-				}
-			}
-			if _, err := s.motion.Move(drawCtx, req); err != nil {
-				if drawCtx.Err() != nil {
-					s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
-					return map[string]interface{}{
-						"status":    "stopped",
-						"completed": i,
-						"total":     len(poses),
-					}, nil
-				}
-				return nil, fmt.Errorf("failed to move to pose %d of %d: %w", i+1, len(poses), err)
-			}
-			if (i+1)%100 == 0 {
-				s.logger.Infof("drew %d of %d poses", i+1, len(poses))
-			}
-		}
+		// Detached from the request context so drawing outlives this request.
+		drawCtx, cancel := context.WithCancel(context.Background())
+		s.drawCancel = cancel
+		s.drawWG.Go(func() {
+			defer func() {
+				s.mu.Lock()
+				s.drawCancel = nil
+				s.mu.Unlock()
+				cancel()
+				s.drawWG.Done()
+			}()
+			s.runDraw(drawCtx, poses)
+		})
 
 		return map[string]interface{}{
-			"status":    "drawing complete",
-			"completed": len(poses),
-			"total":     len(poses),
+			"status": "drawing started",
+			"total":  len(poses),
 		}, nil
+
 	case "stop":
 		s.mu.Lock()
+		defer s.mu.Unlock()
 		cancel := s.drawCancel
-		s.mu.Unlock()
 		if cancel == nil {
 			return map[string]interface{}{"status": "no draw in progress"}, nil
 		}
 		cancel()
+		s.drawWG.Wait()
 		return map[string]interface{}{"status": "stop requested"}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
 }
 
-// Close cancels any in-progress draw.
+// runDraw moves the arm through the poses until done or drawCtx is canceled.
+func (s *posesToArm) runDraw(drawCtx context.Context, poses []drawPose) {
+	for i, pose := range poses {
+		if drawCtx.Err() != nil {
+			s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
+			return
+		}
+		req := motion.MoveReq{
+			ComponentName: s.armName,
+			Destination:   referenceframe.NewPoseInFrame(referenceframe.World, pose.pose),
+		}
+		if pose.linear {
+			req.Constraints = &motionplan.Constraints{
+				LinearConstraint: []motionplan.LinearConstraint{{
+					LineToleranceMm:          linearLineToleranceMM,
+					OrientationToleranceDegs: linearOrientationToleranceDegs,
+				}},
+			}
+		}
+		if _, err := s.motion.Move(drawCtx, req); err != nil {
+			if drawCtx.Err() != nil {
+				s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
+				return
+			}
+			s.logger.Errorf("failed to move to pose %d of %d: %v", i+1, len(poses), err)
+			return
+		}
+		if (i+1)%100 == 0 {
+			s.logger.Infof("drew %d of %d poses", i+1, len(poses))
+		}
+	}
+	s.logger.Infof("drawing complete: %d poses", len(poses))
+}
+
+// Close cancels any in-progress draw and waits for it to finish.
 func (s *posesToArm) Close(ctx context.Context) error {
 	s.mu.Lock()
 	cancel := s.drawCancel
@@ -204,6 +211,7 @@ func (s *posesToArm) Close(ctx context.Context) error {
 	if cancel != nil {
 		cancel()
 	}
+	s.drawWG.Wait()
 	return nil
 }
 
