@@ -331,8 +331,9 @@ func (s *imageToPosesCamera) surfacePlane(ctx context.Context) ([3]float64, erro
 // Images returns a preview of the XY points the get_poses command would
 // produce, computed fresh from the source image on every call: one black dot
 // per point on a white canvas the size of the drawing area. The image is
-// rotated by rotate_degrees and mirrored exactly as get_poses does, so the
-// preview matches what the arm draws. Like get_poses, "threshold" and
+// mirrored as get_poses does but not rotated by rotate_degrees, so the
+// preview reads upright like the source image rather than in the drawing's
+// orientation on the table. Like get_poses, "threshold" and
 // "point_spacing_mm" in extra override the configured values for this call.
 func (s *imageToPosesCamera) Images(
 	ctx context.Context,
@@ -347,7 +348,7 @@ func (s *imageToPosesCamera) Images(
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-	img = mirrorImage(rotateImage(img, s.rotateDeg))
+	img = mirrorImage(img)
 	points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM, s.denseN)
 	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, spacingMM)
 	var buf bytes.Buffer

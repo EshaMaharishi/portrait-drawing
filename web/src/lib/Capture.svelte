@@ -91,7 +91,7 @@
         <img src={previewSrc} alt="Dot preview (as drawn)" />
       {/if}
       <figcaption>
-        <span>Dot preview (as drawn)</span>
+        <span>Dot preview</span>
         <span class="muted">{previewUpdating ? 'updating…' : RESOURCES.imageToPoses}</span>
       </figcaption>
     </figure>
