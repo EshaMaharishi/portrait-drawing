@@ -109,11 +109,11 @@ func newPosesToArm(
 	if err != nil {
 		return nil, err
 	}
-	cam, err := camera.FromDependencies(deps, cfg.Camera)
+	cam, err := camera.FromProvider(deps, cfg.Camera)
 	if err != nil {
 		return nil, err
 	}
-	motionSvc, err := motion.FromDependencies(deps, "builtin")
+	motionSvc, err := motion.FromProvider(deps, "builtin")
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	switch command {
 	case "draw":
 		// Forward the get_poses overrides, if given.
-		posesCmd := map[string]interface{}{"command": "get_poses"}
+		posesCmd := map[string]any{"command": "get_poses"}
 		for _, key := range []string{"threshold", "point_spacing_mm"} {
 			if v, ok := cmd[key]; ok {
 				posesCmd[key] = v
@@ -173,17 +173,17 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 		cancel := s.drawCancel
 		s.mu.Unlock()
 		if cancel == nil {
-			return map[string]interface{}{"status": "no draw in progress"}, nil
+			return map[string]any{"status": "no draw in progress"}, nil
 		}
 		cancel()
 		// Wait (without holding mu, which the draw goroutine needs to exit)
 		// so the arm has actually stopped when this returns.
 		s.drawWG.Wait()
-		return map[string]interface{}{"status": "stopped"}, nil
+		return map[string]any{"status": "stopped"}, nil
 	case "status":
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return map[string]interface{}{
+		return map[string]any{
 			"state":     s.drawState,
 			"completed": s.completed,
 			"total":     s.total,
@@ -242,7 +242,7 @@ func (s *posesToArm) finish(state string, completed, total int, err error) {
 func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{}) {
 	finish := s.finish
 
-	poses, err := s.fetchPoses(ctx, posesCmd)
+	poses, _, err := s.fetchPoses(ctx, posesCmd)
 	if err != nil {
 		if ctx.Err() != nil {
 			finish(stateStopped, 0, 0, nil)
@@ -360,24 +360,24 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 
 // fetchPoses gets the poses from the camera by sending it posesCmd, a
 // get_poses command with any overrides.
-func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]interface{}) ([]drawPose, error) {
+func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([]drawPose, []float64, error) {
 	resp, err := s.cam.DoCommand(ctx, posesCmd)
 	if err != nil {
-		return nil, fmt.Errorf("camera get_poses command failed: %w", err)
+		return nil, nil, fmt.Errorf("camera get_poses command failed: %w", err)
 	}
-	rawPoses, ok := resp["poses"].([]interface{})
+	rawPoses, ok := resp["poses"].([]any)
 	if !ok {
-		return nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
+		return nil, nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
 	}
 	if len(rawPoses) == 0 {
-		return nil, errors.New("camera generated no poses")
+		return nil, nil, errors.New("camera generated no poses")
 	}
 
 	poses := make([]drawPose, len(rawPoses))
 	for i, raw := range rawPoses {
-		p, ok := raw.(map[string]interface{})
+		p, ok := raw.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
+			return nil, nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
 		}
 		linear, _ := p["linear"].(bool)
 		poses[i] = drawPose{
@@ -393,10 +393,16 @@ func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]interfa
 			linear: linear,
 		}
 	}
-	return poses, nil
+
+	darknessLevels, ok := resp["darkness_levels"].([]float64)
+	if !ok {
+		darknessLevels = make([]float64, len(poses))
+	}
+
+	return poses, darknessLevels, nil
 }
 
-func asFloat(v interface{}) float64 {
+func asFloat(v any) float64 {
 	f, _ := v.(float64)
 	return f
 }
