@@ -5,6 +5,7 @@ package main
 
 import (
 	"go.viam.com/rdk/components/camera"
+	genericcomponent "go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
@@ -23,6 +24,6 @@ func main() {
 		resource.APIModel{API: camera.API, Model: backgroundremoval.Model},
 		resource.APIModel{API: generic.API, Model: posestoarm.Model},
 		resource.APIModel{API: worldstatestore.API, Model: posesto3dscene.Model},
-		resource.APIModel{API: generic.API, Model: web.Model},
+		resource.APIModel{API: genericcomponent.API, Model: web.Model},
 	)
 }
