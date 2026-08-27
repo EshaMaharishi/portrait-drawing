@@ -65,6 +65,14 @@
 
 <section class="views">
   <div class="tiles">
+    <figure class="tile small">
+      <CameraImage {partID} name={RESOURCES.camera} refetchInterval={500} width="100%" alt="Camera" />
+      <figcaption><span>Camera</span></figcaption>
+    </figure>
+    <figure class="tile small">
+      <CameraImage {partID} name={RESOURCES.personOnly} refetchInterval={1000} width="100%" alt="Background removed" />
+      <figcaption><span>Background removed</span></figcaption>
+    </figure>
     <figure class="tile hero">
       <CameraImage {partID} name={RESOURCES.sketched} refetchInterval={2000} width="100%" alt="Sketch" />
       <figcaption><span>✏️ Sketch</span></figcaption>
@@ -77,14 +85,6 @@
       {/if}
       {#if previewUpdating}<span class="overlay">updating…</span>{/if}
       <figcaption><span>🤖 What the robot will draw</span></figcaption>
-    </figure>
-    <figure class="tile small">
-      <CameraImage {partID} name={RESOURCES.camera} refetchInterval={500} width="100%" alt="Camera" />
-      <figcaption><span>Camera</span></figcaption>
-    </figure>
-    <figure class="tile small">
-      <CameraImage {partID} name={RESOURCES.personOnly} refetchInterval={1000} width="100%" alt="Background removed" />
-      <figcaption><span>Background removed</span></figcaption>
     </figure>
   </div>
 </section>

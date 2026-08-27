@@ -33,7 +33,7 @@
     <h2>Move the arm out of the way</h2>
   </div>
   <div class="row">
-    <button class="secondary" onclick={goToPicturePosition} disabled={moving || locked || !positions.current}>
+    <button onclick={goToPicturePosition} disabled={moving || locked || !positions.current}>
       <span class="icon">📷</span>
       {moving ? 'Moving arm…' : 'Go to picture-taking position'}
     </button>
