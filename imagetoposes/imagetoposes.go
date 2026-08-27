@@ -305,9 +305,9 @@ func rotateImage(img image.Image, degrees int) image.Image {
 
 // Images returns a preview of the XY points the get_poses command would
 // produce, computed fresh from the source image on every call: one black dot
-// per point on a white canvas the size of the drawing area. The image is
-// mirrored as get_poses does but not rotated by rotate_degrees, so the
-// preview reads upright like the source image rather than in the drawing's
+// per point on a white canvas the size of the drawing area. Unlike
+// get_poses, the image is neither rotated by rotate_degrees nor mirrored, so
+// the preview reads like the source image rather than in the drawing's
 // orientation on the table. Like get_poses, "threshold" and
 // "point_spacing_mm" in extra override the configured values for this call.
 func (s *imageToPosesCamera) Images(
@@ -323,7 +323,6 @@ func (s *imageToPosesCamera) Images(
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-	img = mirrorImage(img)
 	points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM, s.denseN)
 	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, spacingMM)
 	var buf bytes.Buffer
