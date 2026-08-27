@@ -7,40 +7,54 @@
     partID,
     spacingMM,
     drawing = false,
-  }: { partID: string; spacingMM: number; drawing?: boolean } = $props()
+    completed = 0,
+  }: { partID: string; spacingMM: number; drawing?: boolean; completed?: number } = $props()
 
-  // While a draw runs, show the image the robot is actually drawing: the
-  // module captures the preview when the draw starts and serves it from
-  // poses-to-arm's drawing_image command, so any page (even one opened
-  // mid-draw) shows the same thing. Poll until it is available.
+  // While a draw runs, show what the robot is drawing: poses-to-arm renders
+  // the dots on the paper, completed ones black and the rest gray, from its
+  // drawing_image command. Refetch when the completed count changes, at most
+  // every DRAWING_IMAGE_MIN_MS, and keep trying until the first image (the
+  // draw has to fetch its poses before there is one).
+  const DRAWING_IMAGE_MIN_MS = 2000
   const arm = createResourceClient(GenericServiceClient, () => partID, () => RESOURCES.posesToArm)
   let frozenSrc = $state<string | undefined>()
   let frozenError = $state('')
+  let shownCompleted = -1
+  let lastFetch = 0
+  let fetching = false
   async function fetchDrawingImage() {
-    if (!arm.current) return
+    if (!arm.current || fetching) return
+    fetching = true
+    lastFetch = Date.now()
     try {
-      const { png_base64, mime_type } = await doCommand<DrawingImage>(arm.current, { command: 'drawing_image' })
+      const { png_base64, mime_type, completed: got } = await doCommand<DrawingImage>(arm.current, { command: 'drawing_image' })
       if (!png_base64) return
       const bytes = Uint8Array.from(atob(png_base64), (c) => c.charCodeAt(0))
       if (frozenSrc) URL.revokeObjectURL(frozenSrc)
       frozenSrc = URL.createObjectURL(new Blob([bytes], { type: mime_type || 'image/png' }))
+      shownCompleted = got
       frozenError = ''
     } catch (err) {
       frozenError = errorMessage(err)
+    } finally {
+      fetching = false
     }
   }
   $effect(() => {
     void arm.current
+    void completed
     if (!drawing) {
       if (frozenSrc) URL.revokeObjectURL(frozenSrc)
       frozenSrc = undefined
       frozenError = ''
+      shownCompleted = -1
       return
     }
-    if (frozenSrc) return
-    fetchDrawingImage()
-    const id = setInterval(fetchDrawingImage, 1000)
-    return () => clearInterval(id)
+    const stale = !frozenSrc || completed !== shownCompleted
+    if (!stale) return
+    const wait = Math.max(0, lastFetch + DRAWING_IMAGE_MIN_MS - Date.now())
+    const id = setTimeout(fetchDrawingImage, wait)
+    return () => clearTimeout(id)
   })
 
   const imageToPoses = createResourceClient(CameraClient, () => partID, () => RESOURCES.imageToPoses)

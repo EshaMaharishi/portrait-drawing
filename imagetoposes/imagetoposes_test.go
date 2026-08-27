@@ -133,27 +133,31 @@ func TestMirrorImage(t *testing.T) {
 	}
 }
 
-func TestRenderPaperPreview(t *testing.T) {
-	// 100mm x 50mm paper with a 10mm margin at 4px/mm gives a 400x200 canvas.
-	// One point at (25, 25) in the drawing area with 2mm spacing lands at
-	// pixel (40+100, 40+100).
-	img := renderPaperPreview([][3]float64{{25, 25}}, 100, 50, 10, 2)
+func TestPreviewPositionInvertsTransform(t *testing.T) {
+	// A single dark pixel: its point in the transformed image, mapped back
+	// with previewPosition, must equal its point in the upright image.
+	for _, tc := range []struct {
+		up     string
+		mirror bool
+	}{{"+x", true}, {"+x", false}, {"-x", true}, {"-x", false}} {
+		// 6x6 image on 60x60mm at 10mm spacing: one pixel per grid cell.
+		img := image.NewGray(image.Rect(0, 0, 6, 6))
+		for i := range img.Pix {
+			img.Pix[i] = 255
+		}
+		img.SetGray(4, 1, color.Gray{Y: 0})
+		s := &imageToPosesCamera{paperXMM: 0, paperWMM: 60, paperHMM: 60, marginMM: 0, imageUp: tc.up, mirror: tc.mirror}
+		_, _, alongX, alongY := s.drawingArea()
 
-	bounds := img.Bounds()
-	if bounds.Dx() != 400 || bounds.Dy() != 200 {
-		t.Fatalf("expected 400x200 canvas, got %dx%d", bounds.Dx(), bounds.Dy())
-	}
-	if c := color.GrayModel.Convert(img.At(140, 140)).(color.Gray); c.Y != 0 {
-		t.Errorf("expected black at the point center, got gray %d", c.Y)
-	}
-	if c := color.GrayModel.Convert(img.At(0, 0)).(color.Gray); c.Y == 255 {
-		t.Error("expected the paper outline at (0,0)")
-	}
-	if c := color.GrayModel.Convert(img.At(40, 100)).(color.Gray); c.Y == 255 || c.Y == 0 {
-		t.Errorf("expected the light margin line at x=40, got gray %d", c.Y)
-	}
-	if c := color.GrayModel.Convert(img.At(300, 100)).(color.Gray); c.Y != 255 {
-		t.Errorf("expected white far from the point, got gray %d", c.Y)
+		upright := imageToPoints(img, 128, alongY, alongX, 10, 0)
+		transformed := imageToPoints(s.transform(img), 128, alongX, alongY, 10, 0)
+		if len(upright) != 1 || len(transformed) != 1 {
+			t.Fatalf("%v: expected one point each, got %d and %d", tc, len(upright), len(transformed))
+		}
+		u, v := s.previewPosition(transformed[0][0], transformed[0][1])
+		if math.Abs(u-upright[0][0]) > 1e-9 || math.Abs(v-upright[0][1]) > 1e-9 {
+			t.Errorf("%v: previewPosition gave (%v, %v), upright point is (%v, %v)", tc, u, v, upright[0][0], upright[0][1])
+		}
 	}
 }
 

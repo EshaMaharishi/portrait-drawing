@@ -15,6 +15,7 @@ export const RESOURCES = {
 export interface DrawingImage {
   png_base64: string
   mime_type: string
+  completed: number
 }
 
 export interface DrawStatus {

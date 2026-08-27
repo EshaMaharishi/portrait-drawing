@@ -3,10 +3,12 @@
 package posestoarm
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image/png"
 	"sync"
 	"time"
 
@@ -20,6 +22,8 @@ import (
 	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
+
+	"portrait-drawing/paperimage"
 )
 
 // Tolerances for linear-constrained moves: how far the arm may deviate from
@@ -40,6 +44,21 @@ type drawPose struct {
 	linear bool
 	// Level of darkness, where 0 is not dark and 1 is full darkness
 	darkness float64
+	// preview is the dot's position in the camera's upright preview frame
+	// (mm from the drawing area's top-left); nil for hover/travel poses.
+	preview *[2]float64
+}
+
+// drawing is what the current or last draw is drawing, for progress images:
+// the paper as the preview shows it and each contact pose's dot, in order.
+type drawing struct {
+	paper paperimage.Paper
+	// dots[i] is the dot for pose index poseIndex[i].
+	dots      []paperimage.Dot
+	poseIndex []int
+	// cache of the last rendered image and the completed count it showed.
+	pngFor int
+	png    []byte
 }
 
 // Model is the full model triplet for this service.
@@ -105,9 +124,8 @@ type posesToArm struct {
 	completed  int
 	total      int
 	lastErr    string
-	// drawingPNG is the camera's preview of the current or last draw,
-	// rendered from the same frame as its poses; nil if none.
-	drawingPNG []byte
+	// drawing describes the current or last draw's dots; nil if none.
+	drawing *drawing
 }
 
 func newPosesToArm(
@@ -151,9 +169,10 @@ func newPosesToArm(
 //	turn, so the sheet can be placed under it. Runs in the background like
 //	draw and shares its single-flight guard; "stop" cancels it.
 //	{"command": "stop"} - cancels the in-progress draw or show_paper, if any.
-//	{"command": "drawing_image"} - returns the camera's preview of what the
-//	current or last draw is drawing, rendered from the same frame as its
-//	poses, as "png_base64" (empty string if there is none) with "mime_type".
+//	{"command": "drawing_image"} - returns a picture of what the current or
+//	last draw is drawing: its dots on the paper, completed ones black and the
+//	rest gray, as "png_base64" (empty string if there is none) with
+//	"mime_type" and the "completed" count it shows.
 //	{"command": "status"} - returns the state of the current or last action:
 //	"state" (idle, fetching, drawing, showing_paper, stopped, complete, or
 //	error), "completed" and "total" counts (poses for a draw, corners for
@@ -195,12 +214,14 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]any) (map[str
 		s.drawWG.Wait()
 		return map[string]any{"status": "stopped"}, nil
 	case "drawing_image":
-		s.mu.Lock()
-		png := s.drawingPNG
-		s.mu.Unlock()
-		return map[string]interface{}{
+		png, completed, err := s.drawingImage()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
 			"png_base64": base64.StdEncoding.EncodeToString(png),
 			"mime_type":  "image/png",
+			"completed":  completed,
 		}, nil
 	case "status":
 		s.mu.Lock()
@@ -233,7 +254,7 @@ func (s *posesToArm) startAction(initial string, run func(ctx context.Context)) 
 	s.total = 0
 	s.lastErr = ""
 	if initial == stateFetching {
-		s.drawingPNG = nil
+		s.drawing = nil
 	}
 	s.drawWG.Add(1)
 	go func() {
@@ -267,7 +288,7 @@ func (s *posesToArm) finish(state string, completed, total int, err error) {
 func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	finish := s.finish
 
-	poses, png, err := s.fetchPoses(ctx, posesCmd)
+	poses, dr, err := s.fetchPoses(ctx, posesCmd)
 	if err != nil {
 		if ctx.Err() != nil {
 			finish(stateStopped, 0, 0, nil)
@@ -280,7 +301,7 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	s.mu.Lock()
 	s.drawState = stateDrawing
 	s.total = len(poses)
-	s.drawingPNG = png
+	s.drawing = dr
 	s.mu.Unlock()
 
 	for i, pose := range poses {
@@ -388,10 +409,35 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 	s.finish(stateComplete, len(rawCorners), len(rawCorners), nil)
 }
 
+// drawingImage renders the current or last draw's dots with the completed
+// ones black, caching the image per completed count. It returns nil bytes
+// when there is no drawing.
+func (s *posesToArm) drawingImage() ([]byte, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dr := s.drawing
+	if dr == nil {
+		return nil, 0, nil
+	}
+	completed := s.completed
+	if dr.pngFor == completed && dr.png != nil {
+		return dr.png, completed, nil
+	}
+	for i := range dr.dots {
+		dr.dots[i].Done = dr.poseIndex[i] < completed
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, paperimage.Render(dr.paper, dr.dots)); err != nil {
+		return nil, 0, fmt.Errorf("failed to encode the drawing image: %w", err)
+	}
+	dr.pngFor, dr.png = completed, buf.Bytes()
+	return dr.png, completed, nil
+}
+
 // fetchPoses gets the poses from the camera by sending it posesCmd, a
 // get_poses command with any overrides, along with the preview PNG rendered
 // from the same frame when the response carries one (nil otherwise).
-func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([]drawPose, []byte, error) {
+func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([]drawPose, *drawing, error) {
 	resp, err := s.cam.DoCommand(ctx, posesCmd)
 	if err != nil {
 		return nil, nil, fmt.Errorf("camera get_poses command failed: %w", err)
@@ -403,11 +449,16 @@ func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([
 	if len(rawPoses) == 0 {
 		return nil, nil, errors.New("camera generated no poses")
 	}
-	var png []byte
-	if b64, ok := resp["preview_png_base64"].(string); ok && b64 != "" {
-		if png, err = base64.StdEncoding.DecodeString(b64); err != nil {
-			s.logger.Warnw("could not decode the drawing preview", "error", err)
-			png = nil
+	var dr *drawing
+	if pv, ok := resp["preview"].(map[string]any); ok {
+		dr = &drawing{
+			paper: paperimage.Paper{
+				WidthMM:   asFloat(pv["paper_width_mm"]),
+				HeightMM:  asFloat(pv["paper_height_mm"]),
+				MarginMM:  asFloat(pv["margin_mm"]),
+				SpacingMM: asFloat(resp["point_spacing_mm"]),
+			},
+			pngFor: -1,
 		}
 	}
 
@@ -432,8 +483,17 @@ func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([
 			linear:   linear,
 			darkness: darkness,
 		}
+		if u, ok := p["u"].(float64); ok {
+			if v, ok := p["v"].(float64); ok {
+				poses[i].preview = &[2]float64{u, v}
+				if dr != nil {
+					dr.dots = append(dr.dots, paperimage.Dot{U: u, V: v})
+					dr.poseIndex = append(dr.poseIndex, i)
+				}
+			}
+		}
 	}
-	return poses, png, nil
+	return poses, dr, nil
 }
 
 func asFloat(v any) float64 {

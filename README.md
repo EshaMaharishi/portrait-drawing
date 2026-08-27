@@ -9,9 +9,9 @@ Viam-hosted web app to run it.
 |---|---|---|
 | `background-removal` | camera | Source colour frame with everything beyond `max_depth_mm` painted white |
 | `face-crop` | camera | Crops the source image to the largest face (pigo, pure Go) padded by `padding` (0.6); passes the image through when no face is found; `detect` reports the boxes |
-| `image-to-poses` | camera | Turns an image into a dotted pen path that fits on the paper; `GetImage` previews it on the paper outline, `get_poses` returns the poses, `get_paper` the paper corners |
+| `image-to-poses` | camera | Turns an image into a dotted pen path that fits on the paper; `GetImage` previews it on the paper outline, `get_poses` returns the poses (with `include_preview`, each dot's preview position too), `get_paper` the paper corners |
 | `poses-to-3d-scene` | world_state_store | `visualize` / `clear` the poses in the Viam visualizer |
-| `poses-to-arm` | generic service | `draw` (async), `show_paper` (hover over the paper corners), `stop`, `status` |
+| `poses-to-arm` | generic service | `draw` (async), `show_paper` (hover over the paper corners), `stop`, `status`, `drawing_image` (progress picture: done dots black, pending gray) |
 
 `draw` and `show_paper` return immediately with `{"status":"started"}` and run in the
 background; `status` returns `{"state", "completed", "total", "error"}` where `state` is one

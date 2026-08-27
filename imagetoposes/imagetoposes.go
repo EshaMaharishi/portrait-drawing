@@ -6,7 +6,6 @@ package imagetoposes
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"image"
@@ -25,6 +24,8 @@ import (
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
+
+	"portrait-drawing/paperimage"
 )
 
 // Model is the full model triplet for this camera.
@@ -412,6 +413,31 @@ func (s *imageToPosesCamera) Images(
 	return []camera.NamedImage{named}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
 }
 
+// paper describes the sheet as the upright preview shows it: portrait, since
+// the image's top runs along the paper's long (x) side.
+func (s *imageToPosesCamera) paper(spacingMM float64) paperimage.Paper {
+	return paperimage.Paper{WidthMM: s.paperHMM, HeightMM: s.paperWMM, MarginMM: s.marginMM, SpacingMM: spacingMM}
+}
+
+// previewPosition maps a point of the transformed (table-oriented) image,
+// given in millimeters within the drawing area, back to the upright preview
+// frame: the inverse of transform for image_up and mirror.
+func (s *imageToPosesCamera) previewPosition(x, y float64) (u, v float64) {
+	_, _, alongX, alongY := s.drawingArea()
+	// Upright drawing area is alongY wide (u) and alongX tall (v).
+	if s.imageUp == "-x" {
+		// 270 clockwise: new_x = orig_y, new_y = W - orig_x.
+		u, v = alongY-y, x
+	} else {
+		// 90 clockwise: new_x = H - orig_y, new_y = orig_x.
+		u, v = y, alongX-x
+	}
+	if s.mirror {
+		u = alongY - u
+	}
+	return u, v
+}
+
 // previewPNG renders the upright, unmirrored preview of img (already cropped
 // to content if configured) on the paper outline and encodes it as PNG. The
 // image's top points along the paper's long (x) side, so in the image's own
@@ -419,7 +445,11 @@ func (s *imageToPosesCamera) Images(
 func (s *imageToPosesCamera) previewPNG(img image.Image, threshold uint8, spacingMM float64) ([]byte, error) {
 	_, _, alongX, alongY := s.drawingArea()
 	points := imageToPoints(img, threshold, alongY, alongX, spacingMM, s.denseN)
-	preview := renderPaperPreview(points, s.paperHMM, s.paperWMM, s.marginMM, spacingMM)
+	dots := make([]paperimage.Dot, len(points))
+	for i, pt := range points {
+		dots[i] = paperimage.Dot{U: pt[0], V: pt[1], Done: true}
+	}
+	preview := paperimage.Render(s.paper(spacingMM), dots)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, preview); err != nil {
 		return nil, fmt.Errorf("failed to encode preview image: %w", err)
@@ -452,9 +482,11 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]an
 //	and returns the dark cells of a point_spacing_mm grid as poses over a
 //	size_x_mm x size_y_mm drawing area, computed fresh on every call.
 //	Optional "threshold" (0-255, default 128) and "point_spacing_mm" override
-//	the defaults for this call; "include_preview": true adds
-//	"preview_png_base64", the same preview image GetImages returns, rendered
-//	from the very frame these poses came from. Each pose has x and y in millimeters inside
+//	the defaults for this call; "include_preview": true adds "u" and "v" to
+//	each contact pose (its position in millimeters in the upright preview
+//	frame, from the drawing area's top-left) and a "preview" object with the
+//	preview's paper_width_mm, paper_height_mm and margin_mm, so a caller can
+//	render the drawing's progress with paperimage. Each pose has x and y in millimeters inside
 //	the paper's drawing area (the paper inset by margin_mm), z at the
 //	configured surface_z_mm, and an orientation vector pointing straight down
 //	(0, 0, -1) with theta 0, suitable for use as a motion service Move
@@ -483,12 +515,9 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 		if err != nil {
 			return nil, err
 		}
-		// Crop first (it commutes with the transform) so the same upright
-		// image can render the preview that goes with these poses.
 		if s.fitContent {
 			img = cropToContent(img, threshold)
 		}
-		upright := img
 		img = s.transform(img)
 
 		x0, y0, alongX, alongY := s.drawingArea()
@@ -524,7 +553,12 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 					darkness: 0,
 				})
 			}
-			poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z}, downward), darkness: p[2]})
+			u, v := s.previewPosition(p[0], p[1])
+			poses = append(poses, poseEntry{
+				pose:     spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z}, downward),
+				darkness: p[2],
+				preview:  &[2]float64{u, v},
+			})
 			if s.hoverMM > 0 {
 				poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward), darkness: 0})
 			}
@@ -534,15 +568,8 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 			poses = append(poses, *homeEntry)
 		}
 
-		resp := s.posesResponse(poses, spacingMM)
-		if include, _ := cmd["include_preview"].(bool); include {
-			pngBytes, err := s.previewPNG(upright, threshold, spacingMM)
-			if err != nil {
-				return nil, err
-			}
-			resp["preview_png_base64"] = base64.StdEncoding.EncodeToString(pngBytes)
-		}
-		return resp, nil
+		include, _ := cmd["include_preview"].(bool)
+		return s.posesResponse(poses, spacingMM, include), nil
 	case "get_paper":
 		corners := make([]any, 0, 4)
 		for _, c := range s.paperCorners() {
@@ -590,14 +617,17 @@ type poseEntry struct {
 	linear bool
 	// 0 is not dark at all, 1 is full darkness
 	darkness float64
+	// preview is the dot's position in the upright preview frame, in
+	// millimeters from the drawing area's top-left; set for contact poses.
+	preview *[2]float64
 }
 
 // posesResponse builds the get_poses response for a set of poses.
-func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64) map[string]any {
+func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64, includePreview bool) map[string]any {
 	out := make([]any, len(poses))
 	for i, entry := range poses {
 		pt := entry.pose.Point()
-		out[i] = map[string]any{
+		m := map[string]any{
 			"x":        pt.X,
 			"y":        pt.Y,
 			"z":        pt.Z,
@@ -608,14 +638,28 @@ func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64)
 			"linear":   entry.linear,
 			"darkness": entry.darkness,
 		}
+		if includePreview && entry.preview != nil {
+			m["u"], m["v"] = entry.preview[0], entry.preview[1]
+		}
+		out[i] = m
 	}
-	return map[string]any{
+	resp := map[string]any{
 		"poses":            out,
 		"count":            len(out),
 		"size_x_mm":        s.paperWMM - 2*s.marginMM,
 		"size_y_mm":        s.paperHMM - 2*s.marginMM,
 		"point_spacing_mm": spacingMM,
 	}
+	if includePreview {
+		// The paper as the upright preview shows it (portrait).
+		paper := s.paper(spacingMM)
+		resp["preview"] = map[string]any{
+			"paper_width_mm":  paper.WidthMM,
+			"paper_height_mm": paper.HeightMM,
+			"margin_mm":       paper.MarginMM,
+		}
+	}
+	return resp
 }
 
 // contentPaddingFrac is the padding added around the dark pixels' bounding
@@ -843,63 +887,4 @@ func nearestDark(dark []grayscale_color, cols, rows, fromCX, fromCY int) (int, i
 		}
 	}
 	return bestCX, bestCY
-}
-
-// renderPaperPreview draws the paper (paperWMM wide by paperHMM tall on the
-// canvas) with its outline and the margin box, and one black dot per point,
-// at previewPxPerMM resolution. Points are relative to the drawing area's
-// top-left corner, i.e. offset by the margin on the canvas. Each dot's radius
-// is half the spacing, so adjacent points touch.
-func renderPaperPreview(points [][3]float64, paperWMM, paperHMM, marginMM, spacingMM float64) image.Image {
-	w := int(math.Ceil(paperWMM * previewPxPerMM))
-	h := int(math.Ceil(paperHMM * previewPxPerMM))
-	canvas := image.NewGray(image.Rect(0, 0, w, h))
-	for i := range canvas.Pix {
-		canvas.Pix[i] = 255
-	}
-
-	// Paper outline (dark) and margin box (light).
-	drawRect(canvas, 0, 0, w-1, h-1, 3, color.Gray{Y: 40})
-	m := int(math.Round(marginMM * previewPxPerMM))
-	if m > 0 {
-		drawRect(canvas, m, m, w-1-m, h-1-m, 1, color.Gray{Y: 200})
-	}
-
-	radius := spacingMM * previewPxPerMM / 2
-	if radius < 1 {
-		radius = 1
-	}
-	r := int(math.Ceil(radius))
-	offset := marginMM * previewPxPerMM
-	for _, p := range points {
-		cx, cy := offset+p[0]*previewPxPerMM, offset+p[1]*previewPxPerMM
-		for dy := -r; dy <= r; dy++ {
-			for dx := -r; dx <= r; dx++ {
-				x, y := int(cx)+dx, int(cy)+dy
-				if x < 0 || x >= w || y < 0 || y >= h {
-					continue
-				}
-				fx, fy := float64(x)+0.5-cx, float64(y)+0.5-cy
-				if fx*fx+fy*fy <= radius*radius {
-					canvas.SetGray(x, y, color.Gray{Y: 0})
-				}
-			}
-		}
-	}
-	return canvas
-}
-
-// drawRect strokes the rectangle with corners (x0,y0)-(x1,y1) inclusive,
-// thick pixels wide, growing inward.
-func drawRect(canvas *image.Gray, x0, y0, x1, y1, thick int, c color.Gray) {
-	for t := range thick {
-		for x := x0 + t; x <= x1-t; x++ {
-			canvas.SetGray(x, y0+t, c)
-			canvas.SetGray(x, y1-t, c)
-		}
-		for y := y0 + t; y <= y1-t; y++ {
-			canvas.SetGray(x0+t, y, c)
-			canvas.SetGray(x1-t, y, c)
-		}
-	}
 }

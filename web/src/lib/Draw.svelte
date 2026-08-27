@@ -7,7 +7,8 @@
     partID,
     spacingMM,
     drawing = $bindable(false),
-  }: { partID: string; spacingMM: number; drawing?: boolean } = $props()
+    completed = $bindable(0),
+  }: { partID: string; spacingMM: number; drawing?: boolean; completed?: number } = $props()
 
   const arm = createResourceClient(GenericServiceClient, () => partID, () => RESOURCES.posesToArm)
 
@@ -17,6 +18,7 @@
   const active = $derived(status.state === 'fetching' || status.state === 'drawing' || status.state === 'showing_paper')
   $effect(() => {
     drawing = active
+    completed = status.completed
   })
   const percent = $derived(status.total > 0 ? Math.round((100 * status.completed) / status.total) : 0)
   // Keep the last result visible until the next draw starts.

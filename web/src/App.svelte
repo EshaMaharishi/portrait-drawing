@@ -15,6 +15,7 @@
   // Shared tuning values: Capture edits them, Draw sends them with draw.
   let spacingMM = $state(1)
   let drawing = $state(false)
+  let completed = $state(0)
 
   let host = $state('')
   let keyId = $state('')
@@ -40,9 +41,9 @@
       <div class="controls">
         <PaperSetup partID={connection.machineId} locked={drawing} />
         <Adjust partID={connection.machineId} bind:spacingMM locked={drawing} />
-        <Draw partID={connection.machineId} {spacingMM} bind:drawing />
+        <Draw partID={connection.machineId} {spacingMM} bind:drawing bind:completed />
       </div>
-      <LiveView partID={connection.machineId} {spacingMM} {drawing} />
+      <LiveView partID={connection.machineId} {spacingMM} {drawing} {completed} />
     </div>
   </ViamProvider>
 {:else}
