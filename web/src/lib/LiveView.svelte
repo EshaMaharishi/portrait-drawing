@@ -5,10 +5,9 @@
 
   let {
     partID,
-    threshold,
     spacingMM,
     drawing = false,
-  }: { partID: string; threshold: number; spacingMM: number; drawing?: boolean } = $props()
+  }: { partID: string; spacingMM: number; drawing?: boolean } = $props()
 
   // While a draw runs, show the image the robot is actually drawing: the
   // module captures the preview when the draw starts and serves it from
@@ -67,7 +66,7 @@
     try {
       const { images } = await client.getImages(
         ['points'],
-        { threshold, point_spacing_mm: spacingMM },
+        { point_spacing_mm: spacingMM },
         { signal: controller.signal },
       )
       if (controller.signal.aborted) return
@@ -91,7 +90,6 @@
   $effect(() => {
     // Re-run when the client appears or a slider moves; pause while drawing.
     void imageToPoses.current
-    void threshold
     void spacingMM
     if (drawing) return
     const debounce = setTimeout(refreshPreview, PREVIEW_DEBOUNCE_MS)

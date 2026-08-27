@@ -5,10 +5,9 @@
 
   let {
     partID,
-    threshold = $bindable(),
     spacingMM = $bindable(),
     locked = false,
-  }: { partID: string; threshold: number; spacingMM: number; locked?: boolean } = $props()
+  }: { partID: string; spacingMM: number; locked?: boolean } = $props()
 
   const positions = createResourceClient(SwitchClient, () => partID, () => RESOURCES.positions)
 
@@ -40,17 +39,11 @@
   <div class="row" style="margin-bottom: 0.75rem">
     <button onclick={goToPicturePosition} disabled={moving || locked || !positions.current}>
       <span class="icon">📷</span>
-      {moving ? 'Moving arm…' : 'Go to picture-taking position'}
+      {moving ? 'Moving arm…' : 'Click to move arm to picture-taking position'}
     </button>
   </div>
   {#if moveError}<div class="banner error" style="margin: 0 0 0.75rem">{moveError}</div>{/if}
   <div class="sliders">
-    <label class="slider">
-      <span>Darkness</span>
-      <span class="value">{threshold}</span>
-      <input type="range" min="0" max="255" step="1" bind:value={threshold} disabled={locked} />
-      <span class="hint">Higher keeps more of the sketch (more dots, longer drawing).</span>
-    </label>
     <label class="slider">
       <span>Dot spacing</span>
       <span class="value">{spacingMM.toFixed(1)} mm</span>

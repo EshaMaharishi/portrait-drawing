@@ -13,7 +13,6 @@
   let connection = $state.raw(getConnection())
 
   // Shared tuning values: Capture edits them, Draw sends them with draw.
-  let threshold = $state(235)
   let spacingMM = $state(1)
   let drawing = $state(false)
 
@@ -40,10 +39,10 @@
     <div class="layout">
       <div class="controls">
         <PaperSetup partID={connection.machineId} locked={drawing} />
-        <Adjust partID={connection.machineId} bind:threshold bind:spacingMM locked={drawing} />
-        <Draw partID={connection.machineId} {threshold} {spacingMM} bind:drawing />
+        <Adjust partID={connection.machineId} bind:spacingMM locked={drawing} />
+        <Draw partID={connection.machineId} {spacingMM} bind:drawing />
       </div>
-      <LiveView partID={connection.machineId} {threshold} {spacingMM} {drawing} />
+      <LiveView partID={connection.machineId} {spacingMM} {drawing} />
     </div>
   </ViamProvider>
 {:else}

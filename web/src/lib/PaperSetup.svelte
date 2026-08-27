@@ -28,8 +28,9 @@
   </div>
   <div class="row">
     <button onclick={showPaper} disabled={locked || !arm.current}>
-      <span class="icon">📄</span> Show me where the paper goes
+      <span class="icon">📄</span> Click to show where the paper goes
     </button>
   </div>
+  <p class="hint" style="margin-top: 0.5rem">The arm will move to where the four corners of the paper should be.</p>
   {#if error}<div class="banner error">{error}</div>{/if}
 </section>

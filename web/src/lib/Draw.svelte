@@ -5,10 +5,9 @@
 
   let {
     partID,
-    threshold,
     spacingMM,
     drawing = $bindable(false),
-  }: { partID: string; threshold: number; spacingMM: number; drawing?: boolean } = $props()
+  }: { partID: string; spacingMM: number; drawing?: boolean } = $props()
 
   const arm = createResourceClient(GenericServiceClient, () => partID, () => RESOURCES.posesToArm)
 
@@ -68,7 +67,7 @@
     if (!arm.current) return
     error = ''
     try {
-      await doCommand(arm.current, { command: 'draw', threshold, point_spacing_mm: spacingMM })
+      await doCommand(arm.current, { command: 'draw', point_spacing_mm: spacingMM })
       status = { state: 'fetching', completed: 0, total: 0, error: '' }
     } catch (err) {
       error = errorMessage(err)
@@ -97,7 +96,7 @@
   <div class="row nowrap">
     <button class="huge" onclick={draw} disabled={active || !arm.current}>
       <span class="icon">✏️</span>
-      {status.state === 'showing_paper' ? 'Arm is busy…' : active ? 'Drawing…' : 'Draw my portrait'}
+      {status.state === 'showing_paper' ? 'Arm is busy…' : active ? 'Drawing…' : 'Click to start the drawing'}
     </button>
     <button class={active ? 'huge danger' : 'danger'} onclick={stop} disabled={!arm.current}>
       <span class="icon">⏹</span> Stop
