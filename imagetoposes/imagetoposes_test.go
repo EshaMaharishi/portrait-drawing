@@ -3,6 +3,7 @@ package imagetoposes
 import (
 	"image"
 	"image/color"
+	"math"
 	"testing"
 )
 
@@ -126,23 +127,62 @@ func TestMirrorImage(t *testing.T) {
 	}
 }
 
-func TestRenderPoints(t *testing.T) {
-	// 100mm x 50mm area at 4px/mm gives a 400x200 canvas. One point at
-	// (25, 25) with 2mm spacing should paint a dot at pixel (100, 100).
-	img := renderPoints([][2]float64{{25, 25}}, 100, 50, 2)
+func TestRenderPaperPreview(t *testing.T) {
+	// 100mm x 50mm paper with a 10mm margin at 4px/mm gives a 400x200 canvas.
+	// One point at (25, 25) in the drawing area with 2mm spacing lands at
+	// pixel (40+100, 40+100).
+	img := renderPaperPreview([][2]float64{{25, 25}}, 100, 50, 10, 2)
 
 	bounds := img.Bounds()
 	if bounds.Dx() != 400 || bounds.Dy() != 200 {
 		t.Fatalf("expected 400x200 canvas, got %dx%d", bounds.Dx(), bounds.Dy())
 	}
-	if c := color.GrayModel.Convert(img.At(100, 100)).(color.Gray); c.Y != 0 {
+	if c := color.GrayModel.Convert(img.At(140, 140)).(color.Gray); c.Y != 0 {
 		t.Errorf("expected black at the point center, got gray %d", c.Y)
 	}
-	if c := color.GrayModel.Convert(img.At(0, 0)).(color.Gray); c.Y != 255 {
-		t.Errorf("expected white background at (0,0), got gray %d", c.Y)
+	if c := color.GrayModel.Convert(img.At(0, 0)).(color.Gray); c.Y == 255 {
+		t.Error("expected the paper outline at (0,0)")
+	}
+	if c := color.GrayModel.Convert(img.At(40, 100)).(color.Gray); c.Y == 255 || c.Y == 0 {
+		t.Errorf("expected the light margin line at x=40, got gray %d", c.Y)
 	}
 	if c := color.GrayModel.Convert(img.At(300, 100)).(color.Gray); c.Y != 255 {
 		t.Errorf("expected white far from the point, got gray %d", c.Y)
+	}
+}
+
+func TestTransformMatchesLegacyRotate270Mirror(t *testing.T) {
+	// The defaults (mirror, image_up "+x") must reproduce the previous
+	// behaviour of rotating 270 degrees clockwise and then mirroring.
+	img := image.NewGray(image.Rect(0, 0, 3, 2))
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 3; x++ {
+			img.SetGray(x, y, color.Gray{Y: uint8(40*x + 100*y)})
+		}
+	}
+	s := &imageToPosesCamera{imageUp: "+x", mirror: true}
+	got := s.transform(img)
+	want := mirrorImage(rotateImage(img, 270))
+	if got.Bounds() != want.Bounds() {
+		t.Fatalf("bounds differ: %v vs %v", got.Bounds(), want.Bounds())
+	}
+	for y := 0; y < got.Bounds().Dy(); y++ {
+		for x := 0; x < got.Bounds().Dx(); x++ {
+			if grayAt(got, x, y) != grayAt(want, x, y) {
+				t.Fatalf("pixel (%d,%d): got %d want %d", x, y, grayAt(got, x, y), grayAt(want, x, y))
+			}
+		}
+	}
+}
+
+func TestDrawingArea(t *testing.T) {
+	s := &imageToPosesCamera{paperXMM: 300, paperWMM: 279.4, paperHMM: 215.9, marginMM: 25.4}
+	x0, y0, alongX, alongY := s.drawingArea()
+	if x0 != 325.4 || math.Abs(y0-(-82.55)) > 1e-9 {
+		t.Errorf("origin: got (%v, %v), want (325.4, -82.55)", x0, y0)
+	}
+	if math.Abs(alongX-228.6) > 1e-9 || math.Abs(alongY-165.1) > 1e-9 {
+		t.Errorf("extent: got %v x %v, want 228.6 x 165.1", alongX, alongY)
 	}
 }
 
@@ -218,4 +258,8 @@ func TestImageToPointsDownsamples(t *testing.T) {
 	if len(points) != 1 || points[0] != want {
 		t.Fatalf("expected exactly [%v], got %v", want, points)
 	}
+}
+
+func grayAt(img image.Image, x, y int) uint8 {
+	return color.GrayModel.Convert(img.At(x, y)).(color.Gray).Y
 }

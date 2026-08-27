@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/golang/geo/r3"
 
@@ -66,12 +67,19 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 
 // Draw states reported by the status command.
 const (
-	stateIdle     = "idle"
-	stateFetching = "fetching"
-	stateDrawing  = "drawing"
-	stateStopped  = "stopped"
-	stateComplete = "complete"
-	stateError    = "error"
+	stateIdle         = "idle"
+	stateFetching     = "fetching"
+	stateDrawing      = "drawing"
+	stateShowingPaper = "showing_paper"
+	stateStopped      = "stopped"
+	stateComplete     = "complete"
+	stateError        = "error"
+
+	// showPaperPause is how long the pen hovers over each paper corner.
+	showPaperPause = 2 * time.Second
+	// showPaperMinHoverMM keeps the pen off the paper while showing corners
+	// even when hover_above_mm is 0.
+	showPaperMinHoverMM = 5.0
 )
 
 type posesToArm struct {
@@ -130,11 +138,15 @@ func newPosesToArm(
 //	to get_poses as overrides. The draw runs in the background and this
 //	command returns immediately with {"status": "started"}; poll "status" for
 //	progress. Only one draw may run at a time.
-//	{"command": "stop"} - cancels the in-progress draw, if any.
-//	{"command": "status"} - returns the state of the current or last draw:
-//	"state" (idle, fetching, drawing, stopped, complete, or error),
-//	"completed" and "total" pose counts, and "error" (empty unless state is
-//	error).
+//	{"command": "show_paper"} - asks the camera where the paper is (its
+//	get_paper command) and hovers the pen above each corner in turn, pausing
+//	at each, so the sheet can be placed under it. Runs in the background like
+//	draw and shares its single-flight guard; "stop" cancels it.
+//	{"command": "stop"} - cancels the in-progress draw or show_paper, if any.
+//	{"command": "status"} - returns the state of the current or last action:
+//	"state" (idle, fetching, drawing, showing_paper, stopped, complete, or
+//	error), "completed" and "total" counts (poses for a draw, corners for
+//	show_paper), and "error" (empty unless state is error).
 func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -143,20 +155,6 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 
 	switch command {
 	case "draw":
-		s.mu.Lock()
-		if s.drawCancel != nil {
-			s.mu.Unlock()
-			return nil, errors.New(`a draw is already in progress; send the "stop" command to cancel it`)
-		}
-		// The draw outlives this request, so it must not inherit ctx.
-		drawCtx, cancel := context.WithCancel(context.Background())
-		s.drawCancel = cancel
-		s.drawState = stateFetching
-		s.completed = 0
-		s.total = 0
-		s.lastErr = ""
-		s.mu.Unlock()
-
 		// Forward the get_poses overrides, if given.
 		posesCmd := map[string]interface{}{"command": "get_poses"}
 		for _, key := range []string{"threshold", "point_spacing_mm"} {
@@ -164,9 +162,14 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 				posesCmd[key] = v
 			}
 		}
-
-		s.drawWG.Add(1)
-		go s.runDraw(drawCtx, cancel, posesCmd)
+		if err := s.startAction(stateFetching, func(ctx context.Context) { s.runDraw(ctx, posesCmd) }); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"status": "started"}, nil
+	case "show_paper":
+		if err := s.startAction(stateShowingPaper, s.runShowPaper); err != nil {
+			return nil, err
+		}
 		return map[string]interface{}{"status": "started"}, nil
 	case "stop":
 		s.mu.Lock()
@@ -194,28 +197,53 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	}
 }
 
+// startAction begins a background action (a draw or show_paper) if none is
+// running: it resets the reported state to initial, detaches the action from
+// the request context so it outlives the request, and runs it in a goroutine
+// that clears the in-progress marker when it returns.
+func (s *posesToArm) startAction(initial string, run func(ctx context.Context)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.drawCancel != nil {
+		return errors.New(`a draw is already in progress; send the "stop" command to cancel it`)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.drawCancel = cancel
+	s.drawState = initial
+	s.completed = 0
+	s.total = 0
+	s.lastErr = ""
+	s.drawWG.Add(1)
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			s.drawCancel = nil
+			s.mu.Unlock()
+			cancel()
+			s.drawWG.Done()
+		}()
+		run(ctx)
+	}()
+	return nil
+}
+
+// finish records the terminal state of a background action.
+func (s *posesToArm) finish(state string, completed, total int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.drawState = state
+	s.completed = completed
+	s.total = total
+	if err != nil {
+		s.lastErr = err.Error()
+		s.logger.Errorw("action failed", "state", state, "error", err)
+	}
+}
+
 // runDraw fetches the poses and moves the arm through them, recording
 // progress in the service's state until it finishes, fails, or is cancelled.
-func (s *posesToArm) runDraw(ctx context.Context, cancel context.CancelFunc, posesCmd map[string]interface{}) {
-	defer func() {
-		s.mu.Lock()
-		s.drawCancel = nil
-		s.mu.Unlock()
-		cancel()
-		s.drawWG.Done()
-	}()
-
-	finish := func(state string, completed, total int, err error) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.drawState = state
-		s.completed = completed
-		s.total = total
-		if err != nil {
-			s.lastErr = err.Error()
-			s.logger.Errorw("draw failed", "error", err)
-		}
-	}
+func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{}) {
+	finish := s.finish
 
 	poses, err := s.fetchPoses(ctx, posesCmd)
 	if err != nil {
@@ -269,6 +297,74 @@ func (s *posesToArm) runDraw(ctx context.Context, cancel context.CancelFunc, pos
 
 	s.logger.Infof("drawing complete: %d poses", len(poses))
 	finish(stateComplete, len(poses), len(poses), nil)
+}
+
+// runShowPaper asks the camera where the paper is and hovers the pen above
+// each corner in turn, pausing at each, so a sheet can be placed under it.
+func (s *posesToArm) runShowPaper(ctx context.Context) {
+	resp, err := s.cam.DoCommand(ctx, map[string]interface{}{"command": "get_paper"})
+	if err != nil {
+		s.finish(stateError, 0, 0, fmt.Errorf("camera get_paper command failed: %w", err))
+		return
+	}
+	rawCorners, ok := resp["corners"].([]interface{})
+	if !ok || len(rawCorners) == 0 {
+		s.finish(stateError, 0, 0, fmt.Errorf(`camera get_paper response has no "corners" list: %v`, resp))
+		return
+	}
+	z := asFloat(resp["surface_z_mm"])
+	hover := asFloat(resp["hover_above_mm"])
+	if hover < showPaperMinHoverMM {
+		hover = showPaperMinHoverMM
+	}
+
+	s.mu.Lock()
+	s.total = len(rawCorners)
+	s.mu.Unlock()
+
+	downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
+	move := func(x, y, zz float64) error {
+		_, err := s.motion.Move(ctx, motion.MoveReq{
+			ComponentName: s.armName,
+			Destination:   referenceframe.NewPoseInFrame(referenceframe.World, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: zz}, downward)),
+		})
+		return err
+	}
+	for i, raw := range rawCorners {
+		c, ok := raw.([]interface{})
+		if !ok || len(c) != 2 {
+			s.finish(stateError, i, len(rawCorners), fmt.Errorf("unexpected corner format at index %d: %v", i, raw))
+			return
+		}
+		x, y := asFloat(c[0]), asFloat(c[1])
+		// Approach from high above, descend to hover height, pause, lift.
+		steps := []float64{z + 10*hover, z + hover}
+		for _, zz := range steps {
+			if err := move(x, y, zz); err != nil {
+				if ctx.Err() != nil {
+					s.finish(stateStopped, i, len(rawCorners), nil)
+					return
+				}
+				s.finish(stateError, i, len(rawCorners), fmt.Errorf("failed to move to paper corner %d of %d: %w", i+1, len(rawCorners), err))
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			s.finish(stateStopped, i, len(rawCorners), nil)
+			return
+		case <-time.After(showPaperPause):
+		}
+		if err := move(x, y, z+10*hover); err != nil && ctx.Err() == nil {
+			s.finish(stateError, i, len(rawCorners), fmt.Errorf("failed to lift from paper corner %d: %w", i+1, err))
+			return
+		}
+		s.mu.Lock()
+		s.completed = i + 1
+		s.mu.Unlock()
+	}
+	s.logger.Infof("showed %d paper corners", len(rawCorners))
+	s.finish(stateComplete, len(rawCorners), len(rawCorners), nil)
 }
 
 // fetchPoses gets the poses from the camera by sending it posesCmd, a

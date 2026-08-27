@@ -30,9 +30,10 @@ import (
 var Model = resource.NewModel("chess-piece-detection", "portrait-drawing", "image-to-poses")
 
 const (
-	// defaultSizeMM is the width and height in millimeters of the area the
-	// image is mapped onto when size_x_mm/size_y_mm are not set (254mm = 10in).
-	defaultSizeMM = 254.0
+	// Default paper: US Letter, long side along x, and a 1in margin.
+	defaultPaperWidthMM  = 279.4
+	defaultPaperHeightMM = 215.9
+	defaultMarginMM      = 25.4
 	// defaultThreshold is the grayscale value (0-255) at or below which a pixel
 	// is considered dark enough to draw.
 	defaultThreshold = 128
@@ -55,21 +56,30 @@ type Config struct {
 	// Camera is the name of a camera whose image is converted instead of a
 	// file. Exactly one of ImagePath and Camera is required.
 	Camera string `json:"camera"`
-	// TopLeftXMM and TopLeftYMM are the position in millimeters of the
-	// top-left corner of the drawing area; the image's [x, y] coordinates
-	// (origin at the image's top-left) are offset by them. Required.
-	TopLeftXMM *float64 `json:"top_left_x_mm"`
-	TopLeftYMM *float64 `json:"top_left_y_mm"`
+	// PaperXMM is the x position in millimeters (arm world frame) of the
+	// paper's near edge. The paper extends from there along +x for
+	// paper_width_mm and is centered on y = 0. Required.
+	PaperXMM *float64 `json:"paper_x_mm"`
+	// PaperWidthMM and PaperHeightMM are the paper's extent along x and y.
+	// Default to US Letter landscape: 279.4 x 215.9 (11in x 8.5in).
+	PaperWidthMM  float64 `json:"paper_width_mm"`
+	PaperHeightMM float64 `json:"paper_height_mm"`
+	// MarginMM is the border kept clear on all four sides of the paper; the
+	// image is scaled to fit inside the remaining area, preserving aspect
+	// ratio, and centered. Defaults to 25.4 (1in).
+	MarginMM *float64 `json:"margin_mm"`
+	// ImageUp says which way the top of the image points on the table: "+x"
+	// (away from the arm, the default) or "-x" (toward the arm).
+	ImageUp string `json:"image_up"`
+	// Mirror flips the image left-to-right before drawing, so a portrait
+	// drawn from a camera reads like the subject's reflection. Defaults to
+	// true.
+	Mirror *bool `json:"mirror"`
 	// SurfaceZMM is the z position in millimeters (in the arm's world frame)
 	// of the drawing surface; every contact pose is generated at this height.
 	// Jog the arm until the pen touches the paper and use its end position's
 	// z. Required.
 	SurfaceZMM *float64 `json:"surface_z_mm"`
-	// SizeXMM and SizeYMM are the extent in millimeters of the drawing area
-	// along the x and y axes; the image is scaled to fit inside it, preserving
-	// aspect ratio, and centered. Both default to 254mm (10in).
-	SizeXMM float64 `json:"size_x_mm"`
-	SizeYMM float64 `json:"size_y_mm"`
 	// PointSpacingMM is the physical spacing in millimeters between generated
 	// points: the drawing area is divided into a grid of this cell size, and
 	// each cell whose average darkness passes the threshold becomes one pose.
@@ -79,9 +89,6 @@ type Config struct {
 	// is dark enough to draw; lower values keep only darker cells. Defaults
 	// to 128.
 	Threshold *float64 `json:"threshold"`
-	// RotateDegrees rotates the source image clockwise before conversion.
-	// Must be 0, 90, 180, or 270. Defaults to 0.
-	RotateDegrees float64 `json:"rotate_degrees"`
 	// HoverAboveMM lifts the pen between points: after each point's pose, an
 	// additional pose is generated this many millimeters above it. Set to 0
 	// to disable the hover poses. Required.
@@ -107,20 +114,28 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.ImagePath != "" && c.Camera != "" {
 		return nil, nil, fmt.Errorf(`%s: set only one of "image_path" and "camera"`, path)
 	}
-	if c.TopLeftXMM == nil {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_x_mm")
+	if c.PaperXMM == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "paper_x_mm")
 	}
-	if c.TopLeftYMM == nil {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "top_left_y_mm")
+	if c.PaperWidthMM < 0 || c.PaperHeightMM < 0 {
+		return nil, nil, fmt.Errorf("paper_width_mm and paper_height_mm must be positive, got %v x %v", c.PaperWidthMM, c.PaperHeightMM)
+	}
+	if c.MarginMM != nil {
+		if *c.MarginMM < 0 {
+			return nil, nil, fmt.Errorf("margin_mm must be non-negative, got %v", *c.MarginMM)
+		}
+		w, h := c.paperSize()
+		if 2*(*c.MarginMM) >= w || 2*(*c.MarginMM) >= h {
+			return nil, nil, fmt.Errorf("margin_mm %v leaves no drawing area on %v x %v paper", *c.MarginMM, w, h)
+		}
+	}
+	switch c.ImageUp {
+	case "", "+x", "-x":
+	default:
+		return nil, nil, fmt.Errorf(`image_up must be "+x" or "-x", got %q`, c.ImageUp)
 	}
 	if c.SurfaceZMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "surface_z_mm")
-	}
-	if c.SizeXMM < 0 {
-		return nil, nil, fmt.Errorf("size_x_mm must be positive, got %v", c.SizeXMM)
-	}
-	if c.SizeYMM < 0 {
-		return nil, nil, fmt.Errorf("size_y_mm must be positive, got %v", c.SizeYMM)
 	}
 	if c.PointSpacingMM == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "point_spacing_mm")
@@ -130,11 +145,6 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if c.Threshold != nil && (*c.Threshold < 0 || *c.Threshold > 255) {
 		return nil, nil, fmt.Errorf("threshold must be between 0 and 255, got %v", *c.Threshold)
-	}
-	switch c.RotateDegrees {
-	case 0, 90, 180, 270:
-	default:
-		return nil, nil, fmt.Errorf("rotate_degrees must be 0, 90, 180, or 270, got %v", c.RotateDegrees)
 	}
 	if c.MaxHoverTravelMM < 0 {
 		return nil, nil, fmt.Errorf("max_hover_travel_mm must be non-negative, got %v", c.MaxHoverTravelMM)
@@ -155,6 +165,18 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	return deps, nil, nil
 }
 
+// paperSize returns the configured paper size, applying the defaults.
+func (c *Config) paperSize() (float64, float64) {
+	w, h := c.PaperWidthMM, c.PaperHeightMM
+	if w == 0 {
+		w = defaultPaperWidthMM
+	}
+	if h == 0 {
+		h = defaultPaperHeightMM
+	}
+	return w, h
+}
+
 type imageToPosesCamera struct {
 	resource.Named
 	resource.AlwaysRebuild
@@ -164,16 +186,20 @@ type imageToPosesCamera struct {
 	imagePath string
 	// srcCam is the camera the image is read from; nil when image_path is
 	// configured instead.
-	srcCam      camera.Camera
-	xMM         float64
-	yMM         float64
-	sizeXMM     float64
-	sizeYMM     float64
+	srcCam camera.Camera
+	// Paper geometry in the arm's world frame: the paper spans x in
+	// [paperXMM, paperXMM+paperWMM] and y in [-paperHMM/2, paperHMM/2]; the
+	// drawing area is the paper inset by marginMM on every side.
+	paperXMM    float64
+	paperWMM    float64
+	paperHMM    float64
+	marginMM    float64
+	imageUp     string
+	mirror      bool
 	spacingMM   float64
 	threshold   uint8
 	hoverMM     float64
 	maxTravelMM float64
-	rotateDeg   int
 	denseN      int
 	surfaceZMM  float64
 }
@@ -195,13 +221,18 @@ func newImageToPoses(
 			return nil, err
 		}
 	}
-	sizeXMM := cfg.SizeXMM
-	if sizeXMM == 0 {
-		sizeXMM = defaultSizeMM
+	paperW, paperH := cfg.paperSize()
+	margin := defaultMarginMM
+	if cfg.MarginMM != nil {
+		margin = *cfg.MarginMM
 	}
-	sizeYMM := cfg.SizeYMM
-	if sizeYMM == 0 {
-		sizeYMM = defaultSizeMM
+	imageUp := cfg.ImageUp
+	if imageUp == "" {
+		imageUp = "+x"
+	}
+	mirror := true
+	if cfg.Mirror != nil {
+		mirror = *cfg.Mirror
 	}
 	threshold := uint8(defaultThreshold)
 	if cfg.Threshold != nil {
@@ -213,15 +244,16 @@ func newImageToPoses(
 		logger:      logger,
 		imagePath:   cfg.ImagePath,
 		srcCam:      srcCam,
-		xMM:         *cfg.TopLeftXMM,
-		yMM:         *cfg.TopLeftYMM,
-		sizeXMM:     sizeXMM,
-		sizeYMM:     sizeYMM,
+		paperXMM:    *cfg.PaperXMM,
+		paperWMM:    paperW,
+		paperHMM:    paperH,
+		marginMM:    margin,
+		imageUp:     imageUp,
+		mirror:      mirror,
 		spacingMM:   *cfg.PointSpacingMM,
 		threshold:   threshold,
 		hoverMM:     *cfg.HoverAboveMM,
 		maxTravelMM: cfg.MaxHoverTravelMM,
-		rotateDeg:   int(cfg.RotateDegrees),
 		denseN:      int(cfg.DenseBlockSize),
 		surfaceZMM:  *cfg.SurfaceZMM,
 	}, nil
@@ -231,6 +263,36 @@ func newImageToPoses(
 // configured camera, or decoded from the configured PNG file - along with a
 // description of the source for logging. Callers that need the drawing
 // orientation apply rotate_degrees via rotateImage.
+// drawingArea returns the drawing area's origin (its minimum x and y corner)
+// and extent along x and y: the paper inset by the margin.
+func (s *imageToPosesCamera) drawingArea() (x0, y0, alongX, alongY float64) {
+	return s.paperXMM + s.marginMM, -s.paperHMM/2 + s.marginMM,
+		s.paperWMM - 2*s.marginMM, s.paperHMM - 2*s.marginMM
+}
+
+// transform orients the source image for the table: optionally mirrored
+// left-to-right (in the image's own frame), then rotated so the image's top
+// points along image_up. After it, image x runs along world x and image y
+// along world y.
+func (s *imageToPosesCamera) transform(img image.Image) image.Image {
+	if s.mirror {
+		img = mirrorImage(img)
+	}
+	// Rotating 90 degrees clockwise sends the image's top to +x; 270 to -x.
+	if s.imageUp == "-x" {
+		return rotateImage(img, 270)
+	}
+	return rotateImage(img, 90)
+}
+
+// paperCorners lists the paper's corners in world x/y, going around: near
+// edge (low x) from -y to +y, then the far edge back.
+func (s *imageToPosesCamera) paperCorners() [][2]float64 {
+	x0, x1 := s.paperXMM, s.paperXMM+s.paperWMM
+	y0, y1 := -s.paperHMM/2, s.paperHMM/2
+	return [][2]float64{{x0, y0}, {x0, y1}, {x1, y1}, {x1, y0}}
+}
+
 func (s *imageToPosesCamera) sourceImage(ctx context.Context) (image.Image, string, error) {
 	if s.srcCam != nil {
 		img, err := camera.DecodeImageFromCamera(ctx, s.srcCam, nil, nil)
@@ -305,10 +367,11 @@ func rotateImage(img image.Image, degrees int) image.Image {
 
 // Images returns a preview of the XY points the get_poses command would
 // produce, computed fresh from the source image on every call: one black dot
-// per point on a white canvas the size of the drawing area. Unlike
-// get_poses, the image is neither rotated by rotate_degrees nor mirrored, so
-// the preview reads like the source image rather than in the drawing's
-// orientation on the table. Like get_poses, "threshold" and
+// per point drawn on an outline of the paper with its margin, at true scale.
+// Unlike get_poses, the image is neither rotated nor mirrored, so the preview
+// reads like the source image (the paper is shown in portrait orientation,
+// as the image's top points along the paper's long side). Like get_poses,
+// "threshold" and
 // "point_spacing_mm" in extra override the configured values for this call.
 func (s *imageToPosesCamera) Images(
 	ctx context.Context,
@@ -323,8 +386,11 @@ func (s *imageToPosesCamera) Images(
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-	points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM, s.denseN)
-	preview := renderPoints(points, s.sizeXMM, s.sizeYMM, spacingMM)
+	// The image's top points along the paper's long (x) side, so in the
+	// image's own orientation the drawing area is alongY wide and alongX tall.
+	_, _, alongX, alongY := s.drawingArea()
+	points := imageToPoints(img, threshold, alongY, alongX, spacingMM, s.denseN)
+	preview := renderPaperPreview(points, s.paperHMM, s.paperWMM, s.marginMM, spacingMM)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, preview); err != nil {
 		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to encode preview image: %w", err)
@@ -361,15 +427,18 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]in
 //	and returns the dark cells of a point_spacing_mm grid as poses over a
 //	size_x_mm x size_y_mm drawing area, computed fresh on every call.
 //	Optional "threshold" (0-255, default 128) and "point_spacing_mm" override
-//	the defaults for this call. Each pose has x and y in millimeters offset
-//	by the configured top_left_x_mm and top_left_y_mm attributes (the area's
-//	top-left corner), z at the configured surface_z_mm, and an orientation
-//	vector pointing straight down
+//	the defaults for this call. Each pose has x and y in millimeters inside
+//	the paper's drawing area (the paper inset by margin_mm), z at the
+//	configured surface_z_mm, and an orientation vector pointing straight down
 //	(0, 0, -1) with theta 0, suitable for use as a motion service Move
 //	destination. When hover_above_mm is non-zero, each point's pose is
 //	followed by an additional pose that far above it, so the pen lifts
 //	between points, and the sequence starts and ends with a pose at 10x
 //	hover height above the first point.
+//	{"command": "get_paper"} - returns the paper's four corners in world x/y
+//	("corners", going around from the near edge), plus paper_x_mm,
+//	paper_width_mm, paper_height_mm, margin_mm, surface_z_mm and
+//	hover_above_mm, for showing where the paper goes.
 func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
@@ -387,11 +456,12 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		if err != nil {
 			return nil, err
 		}
-		img = mirrorImage(rotateImage(img, s.rotateDeg))
+		img = s.transform(img)
 
-		points := imageToPoints(img, threshold, s.sizeXMM, s.sizeYMM, spacingMM, s.denseN)
+		x0, y0, alongX, alongY := s.drawingArea()
+		points := imageToPoints(img, threshold, alongX, alongY, spacingMM, s.denseN)
 		s.logger.Infof("converted %s to %d points over a %.0fmm x %.0fmm area at %.1fmm spacing",
-			source, len(points), s.sizeXMM, s.sizeYMM, spacingMM)
+			source, len(points), alongX, alongY, spacingMM)
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
 		poses := make([]poseEntry, 0, len(points)*2+2)
@@ -400,7 +470,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		// arm approaches from safely above and retreats there when done.
 		var homeEntry *poseEntry
 		if s.hoverMM > 0 && len(points) > 0 {
-			x, y := s.xMM+points[0][0], s.yMM+points[0][1]
+			x, y := x0+points[0][0], y0+points[0][1]
 			z := s.surfaceZMM
 			homeEntry = &poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + 10*s.hoverMM}, downward)}
 			poses = append(poses, *homeEntry)
@@ -408,7 +478,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 
 		var prevX, prevY float64
 		for i, p := range points {
-			x, y := s.xMM+p[0], s.yMM+p[1]
+			x, y := x0+p[0], y0+p[1]
 			z := s.surfaceZMM
 			// Guard long traverses: cross to above the next point flat at
 			// hover height, on a straight (linear-constrained) path, before
@@ -431,6 +501,20 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 		}
 
 		return s.posesResponse(poses, spacingMM), nil
+	case "get_paper":
+		corners := make([]interface{}, 0, 4)
+		for _, c := range s.paperCorners() {
+			corners = append(corners, []interface{}{c[0], c[1]})
+		}
+		return map[string]interface{}{
+			"corners":         corners,
+			"paper_x_mm":      s.paperXMM,
+			"paper_width_mm":  s.paperWMM,
+			"paper_height_mm": s.paperHMM,
+			"margin_mm":       s.marginMM,
+			"surface_z_mm":    s.surfaceZMM,
+			"hover_above_mm":  s.hoverMM,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
@@ -483,8 +567,8 @@ func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64)
 	return map[string]interface{}{
 		"poses":            out,
 		"count":            len(out),
-		"size_x_mm":        s.sizeXMM,
-		"size_y_mm":        s.sizeYMM,
+		"size_x_mm":        s.paperWMM - 2*s.marginMM,
+		"size_y_mm":        s.paperHMM - 2*s.marginMM,
 		"point_spacing_mm": spacingMM,
 	}
 }
@@ -653,16 +737,24 @@ func nearestDark(dark []bool, cols, rows, fromCX, fromCY int) (int, int) {
 	return bestCX, bestCY
 }
 
-// renderPoints draws the given points as black dots on a white canvas
-// spanning sizeXMM x sizeYMM, at previewPxPerMM resolution. Each dot's
-// radius is half the point spacing, matching the coverage of a pen tip of
-// that width.
-func renderPoints(points [][2]float64, sizeXMM, sizeYMM, spacingMM float64) image.Image {
-	w := int(math.Ceil(sizeXMM * previewPxPerMM))
-	h := int(math.Ceil(sizeYMM * previewPxPerMM))
+// renderPaperPreview draws the paper (paperWMM wide by paperHMM tall on the
+// canvas) with its outline and the margin box, and one black dot per point,
+// at previewPxPerMM resolution. Points are relative to the drawing area's
+// top-left corner, i.e. offset by the margin on the canvas. Each dot's radius
+// is half the spacing, so adjacent points touch.
+func renderPaperPreview(points [][2]float64, paperWMM, paperHMM, marginMM, spacingMM float64) image.Image {
+	w := int(math.Ceil(paperWMM * previewPxPerMM))
+	h := int(math.Ceil(paperHMM * previewPxPerMM))
 	canvas := image.NewGray(image.Rect(0, 0, w, h))
 	for i := range canvas.Pix {
 		canvas.Pix[i] = 255
+	}
+
+	// Paper outline (dark) and margin box (light).
+	drawRect(canvas, 0, 0, w-1, h-1, 3, color.Gray{Y: 40})
+	m := int(math.Round(marginMM * previewPxPerMM))
+	if m > 0 {
+		drawRect(canvas, m, m, w-1-m, h-1-m, 1, color.Gray{Y: 200})
 	}
 
 	radius := spacingMM * previewPxPerMM / 2
@@ -670,8 +762,9 @@ func renderPoints(points [][2]float64, sizeXMM, sizeYMM, spacingMM float64) imag
 		radius = 1
 	}
 	r := int(math.Ceil(radius))
+	offset := marginMM * previewPxPerMM
 	for _, p := range points {
-		cx, cy := p[0]*previewPxPerMM, p[1]*previewPxPerMM
+		cx, cy := offset+p[0]*previewPxPerMM, offset+p[1]*previewPxPerMM
 		for dy := -r; dy <= r; dy++ {
 			for dx := -r; dx <= r; dx++ {
 				x, y := int(cx)+dx, int(cy)+dy
@@ -686,4 +779,19 @@ func renderPoints(points [][2]float64, sizeXMM, sizeYMM, spacingMM float64) imag
 		}
 	}
 	return canvas
+}
+
+// drawRect strokes the rectangle with corners (x0,y0)-(x1,y1) inclusive,
+// thick pixels wide, growing inward.
+func drawRect(canvas *image.Gray, x0, y0, x1, y1, thick int, c color.Gray) {
+	for t := 0; t < thick; t++ {
+		for x := x0 + t; x <= x1-t; x++ {
+			canvas.SetGray(x, y0+t, c)
+			canvas.SetGray(x, y1-t, c)
+		}
+		for y := y0 + t; y <= y1-t; y++ {
+			canvas.SetGray(x0+t, y, c)
+			canvas.SetGray(x1-t, y, c)
+		}
+	}
 }

@@ -12,7 +12,7 @@ export const RESOURCES = {
 } as const
 
 export interface DrawStatus {
-  state: 'idle' | 'fetching' | 'drawing' | 'stopped' | 'complete' | 'error'
+  state: 'idle' | 'fetching' | 'drawing' | 'showing_paper' | 'stopped' | 'complete' | 'error'
   completed: number
   total: number
   error: string

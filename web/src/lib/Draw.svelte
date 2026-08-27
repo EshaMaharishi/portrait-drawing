@@ -15,7 +15,7 @@
   let status = $state<DrawStatus>({ state: 'idle', completed: 0, total: 0, error: '' })
   let error = $state('')
 
-  const active = $derived(status.state === 'fetching' || status.state === 'drawing')
+  const active = $derived(status.state === 'fetching' || status.state === 'drawing' || status.state === 'showing_paper')
   $effect(() => {
     drawing = active
   })
@@ -97,7 +97,7 @@
   <div class="row nowrap">
     <button class="huge" onclick={draw} disabled={active || !arm.current}>
       <span class="icon">✏️</span>
-      {active ? 'Drawing…' : 'Draw my portrait'}
+      {status.state === 'showing_paper' ? 'Arm is busy…' : active ? 'Drawing…' : 'Draw my portrait'}
     </button>
     <button class={active ? 'huge danger' : 'danger'} onclick={stop} disabled={!arm.current}>
       <span class="icon">⏹</span> Stop
@@ -111,12 +111,15 @@
         {#if status.state === 'fetching'}
           <span class="big">Getting ready…</span>
           <span class="detail">turning the sketch into dots</span>
+        {:else if status.state === 'showing_paper'}
+          <span class="big">Showing the paper corners…</span>
+          <span class="detail">corner {Math.min(status.completed + 1, status.total || 4)} of {status.total || 4} — slide the sheet under the pen</span>
         {:else if status.state === 'drawing'}
           <span class="big">{percent}%</span>
           <span class="detail">{status.completed.toLocaleString()} / {status.total.toLocaleString()} moves{eta ? ` · ${eta}` : ''}</span>
         {:else if status.state === 'complete'}
           <span class="big ok">Done! 🎉</span>
-          <span class="detail">{status.total.toLocaleString()} moves</span>
+          <span class="detail">{status.total <= 4 ? 'paper corners shown' : `${status.total.toLocaleString()} moves`}</span>
         {:else if status.state === 'stopped'}
           <span class="big bad">Stopped</span>
           <span class="detail">after {status.completed.toLocaleString()} of {status.total.toLocaleString()} moves</span>

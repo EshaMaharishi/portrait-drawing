@@ -1,11 +1,24 @@
 <script lang="ts">
   import { createResourceClient } from '@viamrobotics/svelte-sdk'
-  import { SwitchClient } from '@viamrobotics/sdk'
-  import { RESOURCES, errorMessage } from '../viam'
+  import { GenericServiceClient, SwitchClient } from '@viamrobotics/sdk'
+  import { RESOURCES, doCommand, errorMessage } from '../viam'
 
   let { partID, locked = false }: { partID: string; locked?: boolean } = $props()
 
   const positions = createResourceClient(SwitchClient, () => partID, () => RESOURCES.positions)
+  const arm = createResourceClient(GenericServiceClient, () => partID, () => RESOURCES.posesToArm)
+
+  // Hover the pen over each paper corner (runs in the background; the Draw
+  // panel shows progress and Stop cancels it).
+  async function showPaper() {
+    if (!arm.current) return
+    error = ''
+    try {
+      await doCommand(arm.current, { command: 'show_paper' })
+    } catch (err) {
+      error = errorMessage(err)
+    }
+  }
 
   // The picture-taking pose is the last preset on the position switch.
   let moving = $state(false)
@@ -36,6 +49,9 @@
     <button onclick={goToPicturePosition} disabled={moving || locked || !positions.current}>
       <span class="icon">📷</span>
       {moving ? 'Moving arm…' : 'Go to picture-taking position'}
+    </button>
+    <button class="secondary" onclick={showPaper} disabled={locked || !arm.current}>
+      <span class="icon">📄</span> Show me where the paper goes
     </button>
   </div>
   {#if error}<div class="banner error">{error}</div>{/if}

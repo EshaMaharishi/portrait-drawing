@@ -8,13 +8,33 @@ Viam-hosted web app to run it.
 | Model | API | Purpose |
 |---|---|---|
 | `background-removal` | camera | Source colour frame with everything beyond `max_depth_mm` painted white |
-| `image-to-poses` | camera | Turns an image into a dotted pen path at the configured `surface_z_mm`; `GetImage` is a preview, `get_poses` returns the poses |
+| `image-to-poses` | camera | Turns an image into a dotted pen path that fits on the paper; `GetImage` previews it on the paper outline, `get_poses` returns the poses, `get_paper` the paper corners |
 | `poses-to-3d-scene` | world_state_store | `visualize` / `clear` the poses in the Viam visualizer |
-| `poses-to-arm` | generic service | `draw` (async), `stop`, `status` |
+| `poses-to-arm` | generic service | `draw` (async), `show_paper` (hover over the paper corners), `stop`, `status` |
 
-`draw` returns immediately with `{"status":"started"}` and runs in the background;
-`status` returns `{"state", "completed", "total", "error"}` where `state` is one of
-`idle`, `fetching`, `drawing`, `stopped`, `complete`, `error`.
+`draw` and `show_paper` return immediately with `{"status":"started"}` and run in the
+background; `status` returns `{"state", "completed", "total", "error"}` where `state` is one
+of `idle`, `fetching`, `drawing`, `showing_paper`, `stopped`, `complete`, `error`.
+
+### Paper geometry (`image-to-poses`)
+
+The paper lies with its long side along the arm's +x axis, centered on y = 0. The image is
+scaled to fit inside the paper minus a margin, preserving aspect ratio, and centered.
+
+| attribute | default | meaning |
+|---|---|---|
+| `paper_x_mm` | required | x of the paper's near edge |
+| `paper_width_mm` | 279.4 | extent along x (11in) |
+| `paper_height_mm` | 215.9 | extent along y (8.5in) |
+| `margin_mm` | 25.4 | border kept clear on all sides (1in) |
+| `image_up` | `"+x"` | which way the top of the image points: `"+x"` away from the arm, `"-x"` toward it |
+| `mirror` | `true` | flip the image left-to-right so a portrait reads like a reflection |
+| `surface_z_mm` | required | z of the paper surface |
+| `point_spacing_mm` | required | grid cell size ≈ pen tip width |
+| `threshold` | 128 | grayscale cutoff for a dot (0-255) |
+| `hover_above_mm` | required | pen lift between dots (0 disables) |
+| `max_hover_travel_mm` | 0 | XY jump beyond which the arm crosses flat at hover height |
+| `dense_block_size` | 0 | collapse fully dark n×n blocks to one dot |
 
 ## Web app (`web/`)
 
