@@ -76,7 +76,7 @@ func newPosesTo3DScene(
 	if err != nil {
 		return nil, err
 	}
-	cam, err := camera.FromDependencies(deps, cfg.Camera)
+	cam, err := camera.FromProvider(deps, cfg.Camera)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +131,7 @@ func (s *posesTo3DScene) StreamTransformChanges(
 //	"threshold" and "point_spacing_mm" are forwarded to the camera, and
 //	"max_poses" (default 2000) caps how many poses are stored, sampled evenly.
 //	{"command": "clear"} - removes all stored transforms.
-func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
 		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
@@ -139,7 +139,7 @@ func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface
 
 	switch command {
 	case "visualize":
-		camCmd := map[string]interface{}{"command": "get_poses"}
+		camCmd := map[string]any{"command": "get_poses"}
 		for _, key := range []string{"threshold", "point_spacing_mm"} {
 			if v, ok := cmd[key]; ok {
 				camCmd[key] = v
@@ -157,7 +157,7 @@ func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface
 		if err != nil {
 			return nil, fmt.Errorf("camera get_poses command failed: %w", err)
 		}
-		rawPoses, ok := resp["poses"].([]interface{})
+		rawPoses, ok := resp["poses"].([]any)
 		if !ok {
 			return nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
 		}
@@ -170,7 +170,7 @@ func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface
 
 		transforms := make(map[string]*commonpb.Transform, len(sampled))
 		for i, raw := range sampled {
-			p, ok := raw.(map[string]interface{})
+			p, ok := raw.(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
 			}
@@ -200,14 +200,14 @@ func (s *posesTo3DScene) DoCommand(ctx context.Context, cmd map[string]interface
 		}
 
 		s.replaceTransforms(transforms)
-		return map[string]interface{}{
+		return map[string]any{
 			"status": "poses stored",
 			"shown":  len(transforms),
 			"total":  total,
 		}, nil
 	case "clear":
 		s.replaceTransforms(nil)
-		return map[string]interface{}{"status": "cleared"}, nil
+		return map[string]any{"status": "cleared"}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %q", command)
 	}
@@ -253,18 +253,18 @@ func (s *posesTo3DScene) emitChange(transform *commonpb.Transform, changeType pb
 }
 
 // samplePoses returns at most max poses, sampled evenly from the input.
-func samplePoses(poses []interface{}, max int) []interface{} {
+func samplePoses(poses []any, max int) []any {
 	if len(poses) <= max {
 		return poses
 	}
-	sampled := make([]interface{}, 0, max)
-	for i := 0; i < max; i++ {
+	sampled := make([]any, 0, max)
+	for i := range max {
 		sampled = append(sampled, poses[i*len(poses)/max])
 	}
 	return sampled
 }
 
-func asFloat(v interface{}) float64 {
+func asFloat(v any) float64 {
 	f, _ := v.(float64)
 	return f
 }

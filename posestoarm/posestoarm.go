@@ -27,11 +27,17 @@ const (
 	linearOrientationToleranceDegs = 5.0
 )
 
+// maxDwellSeconds is how long the pen pauses on a fully dark (darkness 1.0)
+// dot to let ink bleed in; dwell scales linearly with the dot's darkness.
+const maxDwellSeconds = 2
+
 // drawPose is one pose in the drawing sequence; linear marks poses that
 // should be reached on a straight-line-constrained path.
 type drawPose struct {
 	pose   spatialmath.Pose
 	linear bool
+	// Level of darkness, where 0 is not dark and 1 is full darkness
+	darkness float64
 }
 
 // Model is the full model triplet for this service.
@@ -109,11 +115,11 @@ func newPosesToArm(
 	if err != nil {
 		return nil, err
 	}
-	cam, err := camera.FromDependencies(deps, cfg.Camera)
+	cam, err := camera.FromProvider(deps, cfg.Camera)
 	if err != nil {
 		return nil, err
 	}
-	motionSvc, err := motion.FromDependencies(deps, "builtin")
+	motionSvc, err := motion.FromProvider(deps, "builtin")
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +150,7 @@ func newPosesToArm(
 //	"state" (idle, fetching, drawing, showing_paper, stopped, complete, or
 //	error), "completed" and "total" counts (poses for a draw, corners for
 //	show_paper), and "error" (empty unless state is error).
-func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
 		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
@@ -153,7 +159,7 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	switch command {
 	case "draw":
 		// Forward the get_poses overrides, if given.
-		posesCmd := map[string]interface{}{"command": "get_poses"}
+		posesCmd := map[string]any{"command": "get_poses"}
 		for _, key := range []string{"threshold", "point_spacing_mm"} {
 			if v, ok := cmd[key]; ok {
 				posesCmd[key] = v
@@ -162,28 +168,28 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 		if err := s.startAction(stateFetching, func(ctx context.Context) { s.runDraw(ctx, posesCmd) }); err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"status": "started"}, nil
+		return map[string]any{"status": "started"}, nil
 	case "show_paper":
 		if err := s.startAction(stateShowingPaper, s.runShowPaper); err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"status": "started"}, nil
+		return map[string]any{"status": "started"}, nil
 	case "stop":
 		s.mu.Lock()
 		cancel := s.drawCancel
 		s.mu.Unlock()
 		if cancel == nil {
-			return map[string]interface{}{"status": "no draw in progress"}, nil
+			return map[string]any{"status": "no draw in progress"}, nil
 		}
 		cancel()
 		// Wait (without holding mu, which the draw goroutine needs to exit)
 		// so the arm has actually stopped when this returns.
 		s.drawWG.Wait()
-		return map[string]interface{}{"status": "stopped"}, nil
+		return map[string]any{"status": "stopped"}, nil
 	case "status":
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return map[string]interface{}{
+		return map[string]any{
 			"state":     s.drawState,
 			"completed": s.completed,
 			"total":     s.total,
@@ -239,7 +245,7 @@ func (s *posesToArm) finish(state string, completed, total int, err error) {
 
 // runDraw fetches the poses and moves the arm through them, recording
 // progress in the service's state until it finishes, fails, or is cancelled.
-func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{}) {
+func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	finish := s.finish
 
 	poses, err := s.fetchPoses(ctx, posesCmd)
@@ -290,6 +296,10 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{
 		if (i+1)%100 == 0 {
 			s.logger.Infof("drew %d of %d poses", i+1, len(poses))
 		}
+		// Dwell on the dot: holding the pen still lets ink bleed into the
+		// paper, so darker dots get a longer pause.
+		dwell := time.Duration(pose.darkness * maxDwellSeconds * float64(time.Second))
+		time.Sleep(dwell)
 	}
 
 	s.logger.Infof("drawing complete: %d poses", len(poses))
@@ -299,12 +309,12 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{
 // runShowPaper asks the camera where the paper is and dips the pen to hover
 // height above each corner in turn, so a sheet can be placed under it.
 func (s *posesToArm) runShowPaper(ctx context.Context) {
-	resp, err := s.cam.DoCommand(ctx, map[string]interface{}{"command": "get_paper"})
+	resp, err := s.cam.DoCommand(ctx, map[string]any{"command": "get_paper"})
 	if err != nil {
 		s.finish(stateError, 0, 0, fmt.Errorf("camera get_paper command failed: %w", err))
 		return
 	}
-	rawCorners, ok := resp["corners"].([]interface{})
+	rawCorners, ok := resp["corners"].([]any)
 	if !ok || len(rawCorners) == 0 {
 		s.finish(stateError, 0, 0, fmt.Errorf(`camera get_paper response has no "corners" list: %v`, resp))
 		return
@@ -328,7 +338,7 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 		return err
 	}
 	for i, raw := range rawCorners {
-		c, ok := raw.([]interface{})
+		c, ok := raw.([]any)
 		if !ok || len(c) != 2 {
 			s.finish(stateError, i, len(rawCorners), fmt.Errorf("unexpected corner format at index %d: %v", i, raw))
 			return
@@ -360,12 +370,12 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 
 // fetchPoses gets the poses from the camera by sending it posesCmd, a
 // get_poses command with any overrides.
-func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]interface{}) ([]drawPose, error) {
+func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([]drawPose, error) {
 	resp, err := s.cam.DoCommand(ctx, posesCmd)
 	if err != nil {
 		return nil, fmt.Errorf("camera get_poses command failed: %w", err)
 	}
-	rawPoses, ok := resp["poses"].([]interface{})
+	rawPoses, ok := resp["poses"].([]any)
 	if !ok {
 		return nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
 	}
@@ -375,11 +385,12 @@ func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]interfa
 
 	poses := make([]drawPose, len(rawPoses))
 	for i, raw := range rawPoses {
-		p, ok := raw.(map[string]interface{})
+		p, ok := raw.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
 		}
 		linear, _ := p["linear"].(bool)
+		darkness, _ := p["darkness"].(float64)
 		poses[i] = drawPose{
 			pose: spatialmath.NewPose(
 				r3.Vector{X: asFloat(p["x"]), Y: asFloat(p["y"]), Z: asFloat(p["z"])},
@@ -390,13 +401,14 @@ func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]interfa
 					Theta: asFloat(p["theta"]),
 				},
 			),
-			linear: linear,
+			linear:   linear,
+			darkness: darkness,
 		}
 	}
 	return poses, nil
 }
 
-func asFloat(v interface{}) float64 {
+func asFloat(v any) float64 {
 	f, _ := v.(float64)
 	return f
 }

@@ -1,17 +1,23 @@
 package imagetoposes
 
 import (
+	"context"
 	"image"
 	"image/color"
+	"image/png"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"go.viam.com/rdk/logging"
 )
 
 func TestImageToPoints(t *testing.T) {
 	// 4x2 image: black pixels at (0,0) and (3,1), everything else white.
 	img := image.NewGray(image.Rect(0, 0, 4, 2))
-	for y := 0; y < 2; y++ {
-		for x := 0; x < 4; x++ {
+	for y := range 2 {
+		for x := range 4 {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
@@ -27,9 +33,9 @@ func TestImageToPoints(t *testing.T) {
 
 	// Long side is 4px -> 63.5mm per pixel. Height is 2px = 127mm, so the
 	// image is centered vertically with a 63.5mm offset.
-	want := [][2]float64{
-		{31.75, 95.25},   // pixel (0,0): center at 0.5*63.5, 63.5 + 0.5*63.5
-		{222.25, 158.75}, // pixel (3,1): center at 3.5*63.5, 63.5 + 1.5*63.5
+	want := [][3]float64{
+		{31.75, 95.25, 0},   // pixel (0,0): center at 0.5*63.5, 63.5 + 0.5*63.5
+		{222.25, 158.75, 0}, // pixel (3,1): center at 3.5*63.5, 63.5 + 1.5*63.5
 	}
 	for i, p := range points {
 		if p != want[i] {
@@ -57,11 +63,11 @@ func TestImageToPointsNearestNeighborOrder(t *testing.T) {
 	// The walk starts at (0,0) (closest to the top-left corner), then its
 	// neighbor (1,0) one cell away, then (0,2) (sqrt(5) cells from (1,0),
 	// closer than (3,2) at sqrt(8)), then (3,2).
-	want := [][2]float64{
-		{31.75, 63.5},
-		{95.25, 63.5},
-		{31.75, 190.5},
-		{222.25, 190.5},
+	want := [][3]float64{
+		{31.75, 63.5, 0},
+		{95.25, 63.5, 0},
+		{31.75, 190.5, 0},
+		{222.25, 190.5, 0},
 	}
 	if len(points) != len(want) {
 		t.Fatalf("expected %d points, got %d: %v", len(want), len(points), points)
@@ -131,7 +137,7 @@ func TestRenderPaperPreview(t *testing.T) {
 	// 100mm x 50mm paper with a 10mm margin at 4px/mm gives a 400x200 canvas.
 	// One point at (25, 25) in the drawing area with 2mm spacing lands at
 	// pixel (40+100, 40+100).
-	img := renderPaperPreview([][2]float64{{25, 25}}, 100, 50, 10, 2)
+	img := renderPaperPreview([][3]float64{{25, 25}}, 100, 50, 10, 2)
 
 	bounds := img.Bounds()
 	if bounds.Dx() != 400 || bounds.Dy() != 200 {
@@ -155,8 +161,8 @@ func TestTransformMatchesLegacyRotate270Mirror(t *testing.T) {
 	// The defaults (mirror, image_up "+x") must reproduce the previous
 	// behaviour of rotating 270 degrees clockwise and then mirroring.
 	img := image.NewGray(image.Rect(0, 0, 3, 2))
-	for y := 0; y < 2; y++ {
-		for x := 0; x < 3; x++ {
+	for y := range 2 {
+		for x := range 3 {
 			img.SetGray(x, y, color.Gray{Y: uint8(40*x + 100*y)})
 		}
 	}
@@ -197,11 +203,11 @@ func TestImageToPointsDenseBlocks(t *testing.T) {
 	// Kept cells: (1,1), (3,1), (1,3), (3,3). The walk starts at (1,1); the
 	// two-cell jumps to (1,3) and (3,1) tie, and the ring search checks rows
 	// above/below before columns, so (1,3) wins, then (3,3), then (3,1).
-	want := [][2]float64{
-		{95.25, 95.25},
-		{95.25, 222.25},
-		{222.25, 222.25},
-		{222.25, 95.25},
+	want := [][3]float64{
+		{95.25, 95.25, 1},
+		{95.25, 222.25, 1},
+		{222.25, 222.25, 1},
+		{222.25, 95.25, 1},
 	}
 	if len(points) != len(want) {
 		t.Fatalf("expected %d points, got %d: %v", len(want), len(points), points)
@@ -227,8 +233,8 @@ func TestImageToPointsDenseBlocksKeepsPartial(t *testing.T) {
 
 func TestImageToPointsAllWhite(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 3, 3))
-	for y := 0; y < 3; y++ {
-		for x := 0; x < 3; x++ {
+	for y := range 3 {
+		for x := range 3 {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
@@ -242,8 +248,8 @@ func TestImageToPointsDownsamples(t *testing.T) {
 	// Left cell has two black pixels (average 127.5 <= 128, kept); right cell
 	// is all white (dropped).
 	img := image.NewGray(image.Rect(0, 0, 4, 2))
-	for y := 0; y < 2; y++ {
-		for x := 0; x < 4; x++ {
+	for y := range 2 {
+		for x := range 4 {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
@@ -254,7 +260,7 @@ func TestImageToPointsDownsamples(t *testing.T) {
 
 	// The image spans 254mm x 127mm, so yOffset is 63.5mm. The kept cell's
 	// center is at (0.5*127, 63.5 + 0.5*127).
-	want := [2]float64{63.5, 127.0}
+	want := [3]float64{63.5, 127.0, 0}
 	if len(points) != 1 || points[0] != want {
 		t.Fatalf("expected exactly [%v], got %v", want, points)
 	}
@@ -299,5 +305,66 @@ func TestCropToContent(t *testing.T) {
 	}
 	if cropToContent(blank, 128).Bounds() != blank.Bounds() {
 		t.Error("expected a blank image to be returned unchanged")
+	}
+}
+
+// TestGetPosesDarkness checks the get_poses wire format posestoarm reads:
+// every pose carries its own darkness, and only contact poses (at the surface
+// height) are dark enough to dwell on. Darkness now rides on each pose rather
+// than in a parallel list, so it cannot drift out of alignment - but it still
+// has to actually reach the response for any dwell to happen.
+func TestGetPosesDarkness(t *testing.T) {
+	// 4x4 all-black PNG: with denseN 2 every 2x2 block is fully black and
+	// collapses to one center dot with darkness 1.0.
+	path := filepath.Join(t.TempDir(), "src.png")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, image.NewGray(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	const surfaceZ = 12.5
+	cam := &imageToPosesCamera{
+		logger:     logging.NewTestLogger(t),
+		imagePath:  path,
+		paperWMM:   254.0,
+		paperHMM:   254.0,
+		spacingMM:  63.5,
+		threshold:  128,
+		hoverMM:    5, // generates the leading/trailing home poses and hovers
+		denseN:     2,
+		surfaceZMM: surfaceZ,
+	}
+
+	resp, err := cam.DoCommand(context.Background(), map[string]any{"command": "get_poses"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poses, ok := resp["poses"].([]any)
+	if !ok {
+		t.Fatalf("no poses in response: %v", resp)
+	}
+
+	dwells := 0
+	for i, raw := range poses {
+		p := raw.(map[string]any)
+		darkness, ok := p["darkness"].(float64)
+		if !ok {
+			t.Fatalf("pose %d has no darkness: %v", i, p)
+		}
+		contact := p["z"].(float64) == surfaceZ
+		if !contact && darkness != 0 {
+			t.Errorf("pose %d at z=%v is not a contact pose but has darkness %v",
+				i, p["z"], darkness)
+		}
+		if contact && darkness == 1 {
+			dwells++
+		}
+	}
+	if dwells != 4 {
+		t.Errorf("expected 4 collapsed dots at darkness 1.0, got %d", dwells)
 	}
 }
