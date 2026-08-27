@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/golang/geo/r3"
 
@@ -75,8 +74,6 @@ const (
 	stateComplete     = "complete"
 	stateError        = "error"
 
-	// showPaperPause is how long the pen hovers over each paper corner.
-	showPaperPause = 2 * time.Second
 	// showPaperMinHoverMM keeps the pen off the paper while showing corners
 	// even when hover_above_mm is 0.
 	showPaperMinHoverMM = 5.0
@@ -139,8 +136,8 @@ func newPosesToArm(
 //	command returns immediately with {"status": "started"}; poll "status" for
 //	progress. Only one draw may run at a time.
 //	{"command": "show_paper"} - asks the camera where the paper is (its
-//	get_paper command) and hovers the pen above each corner in turn, pausing
-//	at each, so the sheet can be placed under it. Runs in the background like
+//	get_paper command) and dips the pen to hover height above each corner in
+//	turn, so the sheet can be placed under it. Runs in the background like
 //	draw and shares its single-flight guard; "stop" cancels it.
 //	{"command": "stop"} - cancels the in-progress draw or show_paper, if any.
 //	{"command": "status"} - returns the state of the current or last action:
@@ -299,8 +296,8 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{
 	finish(stateComplete, len(poses), len(poses), nil)
 }
 
-// runShowPaper asks the camera where the paper is and hovers the pen above
-// each corner in turn, pausing at each, so a sheet can be placed under it.
+// runShowPaper asks the camera where the paper is and dips the pen to hover
+// height above each corner in turn, so a sheet can be placed under it.
 func (s *posesToArm) runShowPaper(ctx context.Context) {
 	resp, err := s.cam.DoCommand(ctx, map[string]interface{}{"command": "get_paper"})
 	if err != nil {
@@ -337,7 +334,7 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 			return
 		}
 		x, y := asFloat(c[0]), asFloat(c[1])
-		// Approach from high above, descend to hover height, pause, lift.
+		// Approach from high above, dip to hover height, lift.
 		steps := []float64{z + 10*hover, z + hover}
 		for _, zz := range steps {
 			if err := move(x, y, zz); err != nil {
@@ -348,12 +345,6 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 				s.finish(stateError, i, len(rawCorners), fmt.Errorf("failed to move to paper corner %d of %d: %w", i+1, len(rawCorners), err))
 				return
 			}
-		}
-		select {
-		case <-ctx.Done():
-			s.finish(stateStopped, i, len(rawCorners), nil)
-			return
-		case <-time.After(showPaperPause):
 		}
 		if err := move(x, y, z+10*hover); err != nil && ctx.Err() == nil {
 			s.finish(stateError, i, len(rawCorners), fmt.Errorf("failed to lift from paper corner %d: %w", i+1, err))
