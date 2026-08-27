@@ -7,6 +7,8 @@ export const RESOURCES = {
   sketched: 'sketched',
   imageToPoses: 'image-to-poses',
   posesToArm: 'poses-to-arm',
+  // Arm position presets; the last one is the picture-taking position.
+  positions: 'switch-1',
 } as const
 
 export interface DrawStatus {

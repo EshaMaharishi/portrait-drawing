@@ -1,6 +1,6 @@
 <script lang="ts">
   import { CameraImage, createResourceClient } from '@viamrobotics/svelte-sdk'
-  import { CameraClient } from '@viamrobotics/sdk'
+  import { CameraClient, SwitchClient } from '@viamrobotics/sdk'
   import { RESOURCES, errorMessage } from '../viam'
 
   let {
@@ -18,6 +18,26 @@
   ]
 
   const imageToPoses = createResourceClient(CameraClient, () => partID, () => RESOURCES.imageToPoses)
+  const positions = createResourceClient(SwitchClient, () => partID, () => RESOURCES.positions)
+
+  // The picture-taking pose is the last preset on the position switch.
+  let movingArm = $state(false)
+  let moveError = $state('')
+  async function goToPicturePosition() {
+    const client = positions.current
+    if (!client) return
+    movingArm = true
+    moveError = ''
+    try {
+      const [count] = await client.getNumberOfPositions()
+      if (count < 1) throw new Error(`${RESOURCES.positions} has no positions configured`)
+      await client.setPosition(count - 1)
+    } catch (err) {
+      moveError = errorMessage(err)
+    } finally {
+      movingArm = false
+    }
+  }
 
   // The dot preview is fetched by hand so the slider values can be passed as
   // `extra` overrides — the same values draw/visualize use. It is recomputed
@@ -77,6 +97,12 @@
 
 <section class="panel">
   <h2>Capture &amp; preview</h2>
+  <div class="row" style="margin: 0 0 0.75rem">
+    <button class="secondary" onclick={goToPicturePosition} disabled={movingArm || locked || !positions.current}>
+      {movingArm ? 'Moving arm…' : 'Go to picture-taking position'}
+    </button>
+    {#if moveError}<span class="error">{moveError}</span>{/if}
+  </div>
   <div class="grid">
     {#each feeds as feed (feed.name)}
       <figure>
