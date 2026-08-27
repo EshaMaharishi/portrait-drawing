@@ -1,7 +1,7 @@
 <script lang="ts">
   import { CameraImage, createResourceClient } from '@viamrobotics/svelte-sdk'
-  import { CameraClient } from '@viamrobotics/sdk'
-  import { RESOURCES, errorMessage } from '../viam'
+  import { CameraClient, GenericServiceClient } from '@viamrobotics/sdk'
+  import { RESOURCES, doCommand, errorMessage, type DrawingImage } from '../viam'
 
   let {
     partID,
@@ -10,22 +10,38 @@
     drawing = false,
   }: { partID: string; threshold: number; spacingMM: number; drawing?: boolean } = $props()
 
-  // While a draw runs, show a frozen copy of the preview as it was when Draw
-  // was clicked, instead of the live feeds. If the page opened mid-draw there
-  // is no preview yet, so fetch one (polling is paused while drawing) and
-  // freeze that.
+  // While a draw runs, show the image the robot is actually drawing: the
+  // module captures the preview when the draw starts and serves it from
+  // poses-to-arm's drawing_image command, so any page (even one opened
+  // mid-draw) shows the same thing. Poll until it is available.
+  const arm = createResourceClient(GenericServiceClient, () => partID, () => RESOURCES.posesToArm)
   let frozenSrc = $state<string | undefined>()
+  let frozenError = $state('')
+  async function fetchDrawingImage() {
+    if (!arm.current) return
+    try {
+      const { png_base64, mime_type } = await doCommand<DrawingImage>(arm.current, { command: 'drawing_image' })
+      if (!png_base64) return
+      const bytes = Uint8Array.from(atob(png_base64), (c) => c.charCodeAt(0))
+      if (frozenSrc) URL.revokeObjectURL(frozenSrc)
+      frozenSrc = URL.createObjectURL(new Blob([bytes], { type: mime_type || 'image/png' }))
+      frozenError = ''
+    } catch (err) {
+      frozenError = errorMessage(err)
+    }
+  }
   $effect(() => {
+    void arm.current
     if (!drawing) {
+      if (frozenSrc) URL.revokeObjectURL(frozenSrc)
       frozenSrc = undefined
+      frozenError = ''
       return
     }
     if (frozenSrc) return
-    if (previewSrc) {
-      frozenSrc = previewSrc
-    } else if (imageToPoses.current) {
-      refreshPreview()
-    }
+    fetchDrawingImage()
+    const id = setInterval(fetchDrawingImage, 1000)
+    return () => clearInterval(id)
   })
 
   const imageToPoses = createResourceClient(CameraClient, () => partID, () => RESOURCES.imageToPoses)
@@ -92,8 +108,8 @@
     <figure class="tile hero drawing">
       {#if frozenSrc}
         <img src={frozenSrc} alt="What the robot is drawing" />
-      {:else if previewError}
-        <div class="banner error" style="margin: 0.75rem">{previewError}</div>
+      {:else if frozenError}
+        <div class="banner error" style="margin: 0.75rem">{frozenError}</div>
       {:else}
         <p class="hint" style="padding: 2rem; text-align: center">Loading the drawing…</p>
       {/if}

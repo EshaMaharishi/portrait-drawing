@@ -12,6 +12,11 @@ export const RESOURCES = {
   positions: 'switch-1',
 } as const
 
+export interface DrawingImage {
+  png_base64: string
+  mime_type: string
+}
+
 export interface DrawStatus {
   state: 'idle' | 'fetching' | 'drawing' | 'showing_paper' | 'stopped' | 'complete' | 'error'
   completed: number

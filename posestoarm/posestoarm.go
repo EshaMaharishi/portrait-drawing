@@ -4,6 +4,7 @@ package posestoarm
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sync"
@@ -104,6 +105,9 @@ type posesToArm struct {
 	completed  int
 	total      int
 	lastErr    string
+	// drawingPNG is the camera's preview of the current or last draw,
+	// rendered from the same frame as its poses; nil if none.
+	drawingPNG []byte
 }
 
 func newPosesToArm(
@@ -147,6 +151,9 @@ func newPosesToArm(
 //	turn, so the sheet can be placed under it. Runs in the background like
 //	draw and shares its single-flight guard; "stop" cancels it.
 //	{"command": "stop"} - cancels the in-progress draw or show_paper, if any.
+//	{"command": "drawing_image"} - returns the camera's preview of what the
+//	current or last draw is drawing, rendered from the same frame as its
+//	poses, as "png_base64" (empty string if there is none) with "mime_type".
 //	{"command": "status"} - returns the state of the current or last action:
 //	"state" (idle, fetching, drawing, showing_paper, stopped, complete, or
 //	error), "completed" and "total" counts (poses for a draw, corners for
@@ -160,7 +167,7 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]any) (map[str
 	switch command {
 	case "draw":
 		// Forward the get_poses overrides, if given.
-		posesCmd := map[string]any{"command": "get_poses"}
+		posesCmd := map[string]any{"command": "get_poses", "include_preview": true}
 		for _, key := range []string{"threshold", "point_spacing_mm"} {
 			if v, ok := cmd[key]; ok {
 				posesCmd[key] = v
@@ -187,6 +194,14 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]any) (map[str
 		// so the arm has actually stopped when this returns.
 		s.drawWG.Wait()
 		return map[string]any{"status": "stopped"}, nil
+	case "drawing_image":
+		s.mu.Lock()
+		png := s.drawingPNG
+		s.mu.Unlock()
+		return map[string]interface{}{
+			"png_base64": base64.StdEncoding.EncodeToString(png),
+			"mime_type":  "image/png",
+		}, nil
 	case "status":
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -217,6 +232,9 @@ func (s *posesToArm) startAction(initial string, run func(ctx context.Context)) 
 	s.completed = 0
 	s.total = 0
 	s.lastErr = ""
+	if initial == stateFetching {
+		s.drawingPNG = nil
+	}
 	s.drawWG.Add(1)
 	go func() {
 		defer func() {
@@ -249,7 +267,7 @@ func (s *posesToArm) finish(state string, completed, total int, err error) {
 func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	finish := s.finish
 
-	poses, err := s.fetchPoses(ctx, posesCmd)
+	poses, png, err := s.fetchPoses(ctx, posesCmd)
 	if err != nil {
 		if ctx.Err() != nil {
 			finish(stateStopped, 0, 0, nil)
@@ -262,6 +280,7 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	s.mu.Lock()
 	s.drawState = stateDrawing
 	s.total = len(poses)
+	s.drawingPNG = png
 	s.mu.Unlock()
 
 	for i, pose := range poses {
@@ -370,25 +389,33 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 }
 
 // fetchPoses gets the poses from the camera by sending it posesCmd, a
-// get_poses command with any overrides.
-func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([]drawPose, error) {
+// get_poses command with any overrides, along with the preview PNG rendered
+// from the same frame when the response carries one (nil otherwise).
+func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([]drawPose, []byte, error) {
 	resp, err := s.cam.DoCommand(ctx, posesCmd)
 	if err != nil {
-		return nil, fmt.Errorf("camera get_poses command failed: %w", err)
+		return nil, nil, fmt.Errorf("camera get_poses command failed: %w", err)
 	}
 	rawPoses, ok := resp["poses"].([]any)
 	if !ok {
-		return nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
+		return nil, nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
 	}
 	if len(rawPoses) == 0 {
-		return nil, errors.New("camera generated no poses")
+		return nil, nil, errors.New("camera generated no poses")
+	}
+	var png []byte
+	if b64, ok := resp["preview_png_base64"].(string); ok && b64 != "" {
+		if png, err = base64.StdEncoding.DecodeString(b64); err != nil {
+			s.logger.Warnw("could not decode the drawing preview", "error", err)
+			png = nil
+		}
 	}
 
 	poses := make([]drawPose, len(rawPoses))
 	for i, raw := range rawPoses {
 		p, ok := raw.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
+			return nil, nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
 		}
 		linear, _ := p["linear"].(bool)
 		darkness, _ := p["darkness"].(float64)
@@ -406,7 +433,7 @@ func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([
 			darkness: darkness,
 		}
 	}
-	return poses, nil
+	return poses, png, nil
 }
 
 func asFloat(v any) float64 {

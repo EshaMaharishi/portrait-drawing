@@ -6,6 +6,7 @@ package imagetoposes
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"image"
@@ -397,23 +398,33 @@ func (s *imageToPosesCamera) Images(
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-	// The image's top points along the paper's long (x) side, so in the
-	// image's own orientation the drawing area is alongY wide and alongX tall.
 	if s.fitContent {
 		img = cropToContent(img, threshold)
 	}
+	pngBytes, err := s.previewPNG(img, threshold, spacingMM)
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, err
+	}
+	named, err := camera.NamedImageFromBytes(pngBytes, "points", rdkutils.MimeTypePNG, data.Annotations{})
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, err
+	}
+	return []camera.NamedImage{named}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
+}
+
+// previewPNG renders the upright, unmirrored preview of img (already cropped
+// to content if configured) on the paper outline and encodes it as PNG. The
+// image's top points along the paper's long (x) side, so in the image's own
+// orientation the drawing area is alongY wide and alongX tall.
+func (s *imageToPosesCamera) previewPNG(img image.Image, threshold uint8, spacingMM float64) ([]byte, error) {
 	_, _, alongX, alongY := s.drawingArea()
 	points := imageToPoints(img, threshold, alongY, alongX, spacingMM, s.denseN)
 	preview := renderPaperPreview(points, s.paperHMM, s.paperWMM, s.marginMM, spacingMM)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, preview); err != nil {
-		return nil, resource.ResponseMetadata{}, fmt.Errorf("failed to encode preview image: %w", err)
+		return nil, fmt.Errorf("failed to encode preview image: %w", err)
 	}
-	named, err := camera.NamedImageFromBytes(buf.Bytes(), "points", rdkutils.MimeTypePNG, data.Annotations{})
-	if err != nil {
-		return nil, resource.ResponseMetadata{}, err
-	}
-	return []camera.NamedImage{named}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
+	return buf.Bytes(), nil
 }
 
 // NextPointCloud is unimplemented; this camera only serves 2D images.
@@ -441,7 +452,9 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]an
 //	and returns the dark cells of a point_spacing_mm grid as poses over a
 //	size_x_mm x size_y_mm drawing area, computed fresh on every call.
 //	Optional "threshold" (0-255, default 128) and "point_spacing_mm" override
-//	the defaults for this call. Each pose has x and y in millimeters inside
+//	the defaults for this call; "include_preview": true adds
+//	"preview_png_base64", the same preview image GetImages returns, rendered
+//	from the very frame these poses came from. Each pose has x and y in millimeters inside
 //	the paper's drawing area (the paper inset by margin_mm), z at the
 //	configured surface_z_mm, and an orientation vector pointing straight down
 //	(0, 0, -1) with theta 0, suitable for use as a motion service Move
@@ -470,10 +483,13 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 		if err != nil {
 			return nil, err
 		}
-		img = s.transform(img)
+		// Crop first (it commutes with the transform) so the same upright
+		// image can render the preview that goes with these poses.
 		if s.fitContent {
 			img = cropToContent(img, threshold)
 		}
+		upright := img
+		img = s.transform(img)
 
 		x0, y0, alongX, alongY := s.drawingArea()
 		points := imageToPoints(img, threshold, alongX, alongY, spacingMM, s.denseN)
@@ -518,7 +534,15 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 			poses = append(poses, *homeEntry)
 		}
 
-		return s.posesResponse(poses, spacingMM), nil
+		resp := s.posesResponse(poses, spacingMM)
+		if include, _ := cmd["include_preview"].(bool); include {
+			pngBytes, err := s.previewPNG(upright, threshold, spacingMM)
+			if err != nil {
+				return nil, err
+			}
+			resp["preview_png_base64"] = base64.StdEncoding.EncodeToString(pngBytes)
+		}
+		return resp, nil
 	case "get_paper":
 		corners := make([]any, 0, 4)
 		for _, c := range s.paperCorners() {
