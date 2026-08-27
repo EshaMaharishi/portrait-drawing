@@ -263,3 +263,41 @@ func TestImageToPointsDownsamples(t *testing.T) {
 func grayAt(img image.Image, x, y int) uint8 {
 	return color.GrayModel.Convert(img.At(x, y)).(color.Gray).Y
 }
+
+func TestCropToContent(t *testing.T) {
+	// 100x100 white image with a black 10x20 block at (40..49, 30..49).
+	img := image.NewGray(image.Rect(0, 0, 100, 100))
+	for i := range img.Pix {
+		img.Pix[i] = 255
+	}
+	for y := 30; y < 50; y++ {
+		for x := 40; x < 50; x++ {
+			img.SetGray(x, y, color.Gray{Y: 0})
+		}
+	}
+	got := cropToContent(img, 128).Bounds()
+	// Padding is 3% of the larger side (20px) -> 1px.
+	want := image.Rect(39, 29, 51, 51)
+	if got != want {
+		t.Errorf("crop: got %v, want %v", got, want)
+	}
+
+	// The crop is clamped to the image.
+	edge := image.NewGray(image.Rect(0, 0, 10, 10))
+	for i := range edge.Pix {
+		edge.Pix[i] = 255
+	}
+	edge.SetGray(0, 0, color.Gray{Y: 0})
+	if got := cropToContent(edge, 128).Bounds(); got.Min != image.Pt(0, 0) {
+		t.Errorf("clamped crop: got %v", got)
+	}
+
+	// All white: unchanged.
+	blank := image.NewGray(image.Rect(0, 0, 10, 10))
+	for i := range blank.Pix {
+		blank.Pix[i] = 255
+	}
+	if cropToContent(blank, 128).Bounds() != blank.Bounds() {
+		t.Error("expected a blank image to be returned unchanged")
+	}
+}

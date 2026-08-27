@@ -75,6 +75,11 @@ type Config struct {
 	// drawn from a camera reads like the subject's reflection. Defaults to
 	// true.
 	Mirror *bool `json:"mirror"`
+	// FitToContent crops the image to the bounding box of its dark pixels
+	// (plus a small padding) before scaling, so the subject fills the
+	// drawing area instead of the whole camera frame being fitted. Defaults
+	// to true.
+	FitToContent *bool `json:"fit_to_content"`
 	// SurfaceZMM is the z position in millimeters (in the arm's world frame)
 	// of the drawing surface; every contact pose is generated at this height.
 	// Jog the arm until the pen touches the paper and use its end position's
@@ -196,6 +201,7 @@ type imageToPosesCamera struct {
 	marginMM    float64
 	imageUp     string
 	mirror      bool
+	fitContent  bool
 	spacingMM   float64
 	threshold   uint8
 	hoverMM     float64
@@ -234,6 +240,10 @@ func newImageToPoses(
 	if cfg.Mirror != nil {
 		mirror = *cfg.Mirror
 	}
+	fitContent := true
+	if cfg.FitToContent != nil {
+		fitContent = *cfg.FitToContent
+	}
 	threshold := uint8(defaultThreshold)
 	if cfg.Threshold != nil {
 		threshold = uint8(*cfg.Threshold)
@@ -250,6 +260,7 @@ func newImageToPoses(
 		marginMM:    margin,
 		imageUp:     imageUp,
 		mirror:      mirror,
+		fitContent:  fitContent,
 		spacingMM:   *cfg.PointSpacingMM,
 		threshold:   threshold,
 		hoverMM:     *cfg.HoverAboveMM,
@@ -388,6 +399,9 @@ func (s *imageToPosesCamera) Images(
 	}
 	// The image's top points along the paper's long (x) side, so in the
 	// image's own orientation the drawing area is alongY wide and alongX tall.
+	if s.fitContent {
+		img = cropToContent(img, threshold)
+	}
 	_, _, alongX, alongY := s.drawingArea()
 	points := imageToPoints(img, threshold, alongY, alongX, spacingMM, s.denseN)
 	preview := renderPaperPreview(points, s.paperHMM, s.paperWMM, s.marginMM, spacingMM)
@@ -457,6 +471,9 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 			return nil, err
 		}
 		img = s.transform(img)
+		if s.fitContent {
+			img = cropToContent(img, threshold)
+		}
 
 		x0, y0, alongX, alongY := s.drawingArea()
 		points := imageToPoints(img, threshold, alongX, alongY, spacingMM, s.denseN)
@@ -571,6 +588,45 @@ func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64)
 		"size_y_mm":        s.paperHMM - 2*s.marginMM,
 		"point_spacing_mm": spacingMM,
 	}
+}
+
+// contentPaddingFrac is the padding added around the dark pixels' bounding
+// box by cropToContent, as a fraction of the box's larger side.
+const contentPaddingFrac = 0.03
+
+// cropToContent returns the sub-image covering every pixel at or below
+// threshold, padded by contentPaddingFrac and clamped to the image. An image
+// with no dark pixels is returned unchanged.
+func cropToContent(img image.Image, threshold uint8) image.Image {
+	bounds := img.Bounds()
+	minX, minY := bounds.Max.X, bounds.Max.Y
+	maxX, maxY := bounds.Min.X-1, bounds.Min.Y-1
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if color.GrayModel.Convert(img.At(x, y)).(color.Gray).Y <= threshold {
+				minX, maxX = min(minX, x), max(maxX, x)
+				minY, maxY = min(minY, y), max(maxY, y)
+			}
+		}
+	}
+	if maxX < minX {
+		return img
+	}
+	pad := int(math.Ceil(contentPaddingFrac * float64(max(maxX-minX+1, maxY-minY+1))))
+	crop := image.Rect(minX-pad, minY-pad, maxX+pad+1, maxY+pad+1).Intersect(bounds)
+	type subImager interface {
+		SubImage(image.Rectangle) image.Image
+	}
+	if si, ok := img.(subImager); ok {
+		return si.SubImage(crop)
+	}
+	out := image.NewRGBA(image.Rect(0, 0, crop.Dx(), crop.Dy()))
+	for y := crop.Min.Y; y < crop.Max.Y; y++ {
+		for x := crop.Min.X; x < crop.Max.X; x++ {
+			out.Set(x-crop.Min.X, y-crop.Min.Y, img.At(x, y))
+		}
+	}
+	return out
 }
 
 // imageToPoints converts the image to points (in millimeters) on a grid of

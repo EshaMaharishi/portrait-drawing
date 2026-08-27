@@ -29,6 +29,7 @@ scaled to fit inside the paper minus a margin, preserving aspect ratio, and cent
 | `margin_mm` | 25.4 | border kept clear on all sides (1in) |
 | `image_up` | `"+x"` | which way the top of the image points: `"+x"` away from the arm, `"-x"` toward it |
 | `mirror` | `true` | flip the image left-to-right so a portrait reads like a reflection |
+| `fit_to_content` | `true` | crop to the dark pixels (plus 3% padding) before scaling, so the subject fills the drawing area |
 | `surface_z_mm` | required | z of the paper surface |
 | `point_spacing_mm` | required | grid cell size ≈ pen tip width |
 | `threshold` | 128 | grayscale cutoff for a dot (0-255) |
