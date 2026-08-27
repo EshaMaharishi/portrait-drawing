@@ -1,9 +1,35 @@
 <script lang="ts">
+  import { createResourceClient } from '@viamrobotics/svelte-sdk'
+  import { SwitchClient } from '@viamrobotics/sdk'
+  import { RESOURCES, errorMessage } from '../viam'
+
   let {
+    partID,
     threshold = $bindable(),
     spacingMM = $bindable(),
     locked = false,
-  }: { threshold: number; spacingMM: number; locked?: boolean } = $props()
+  }: { partID: string; threshold: number; spacingMM: number; locked?: boolean } = $props()
+
+  const positions = createResourceClient(SwitchClient, () => partID, () => RESOURCES.positions)
+
+  // The picture-taking pose is the last preset on the position switch.
+  let moving = $state(false)
+  let moveError = $state('')
+  async function goToPicturePosition() {
+    const client = positions.current
+    if (!client) return
+    moving = true
+    moveError = ''
+    try {
+      const [count] = await client.getNumberOfPositions()
+      if (count < 1) throw new Error(`${RESOURCES.positions} has no positions configured`)
+      await client.setPosition(count - 1)
+    } catch (err) {
+      moveError = errorMessage(err)
+    } finally {
+      moving = false
+    }
+  }
 </script>
 
 <section class="step" class:locked class:active={!locked}>
@@ -11,6 +37,13 @@
     <span class="step-num">2</span>
     <h2>Check the picture, then adjust</h2>
   </div>
+  <div class="row" style="margin-bottom: 0.75rem">
+    <button onclick={goToPicturePosition} disabled={moving || locked || !positions.current}>
+      <span class="icon">📷</span>
+      {moving ? 'Moving arm…' : 'Go to picture-taking position'}
+    </button>
+  </div>
+  {#if moveError}<div class="banner error" style="margin: 0 0 0.75rem">{moveError}</div>{/if}
   <div class="sliders">
     <label class="slider">
       <span>Darkness</span>

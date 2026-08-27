@@ -3,7 +3,7 @@
   import type { DialConf } from '@viamrobotics/sdk'
   import { getConnection, saveConnection } from './auth'
   import ConnectionBadge from './lib/ConnectionBadge.svelte'
-  import ArmPosition from './lib/ArmPosition.svelte'
+  import PaperSetup from './lib/PaperSetup.svelte'
   import Adjust from './lib/Adjust.svelte'
   import LiveView from './lib/LiveView.svelte'
   import Draw from './lib/Draw.svelte'
@@ -39,8 +39,8 @@
     </header>
     <div class="layout">
       <div class="controls">
-        <ArmPosition partID={connection.machineId} locked={drawing} />
-        <Adjust bind:threshold bind:spacingMM locked={drawing} />
+        <PaperSetup partID={connection.machineId} locked={drawing} />
+        <Adjust partID={connection.machineId} bind:threshold bind:spacingMM locked={drawing} />
         <Draw partID={connection.machineId} {threshold} {spacingMM} bind:drawing />
       </div>
       <LiveView partID={connection.machineId} {threshold} {spacingMM} {drawing} />
