@@ -308,12 +308,12 @@ func TestCropToContent(t *testing.T) {
 	}
 }
 
-// TestGetPosesDarknessAlignment guards the invariant posestoarm relies on:
-// darkness_levels is index-aligned with poses and the same length, so a dwell
-// can be looked up by pose index. Only contact poses (at the surface height)
-// may carry a non-zero level - a hover or home pose that picked one up would
-// mean the two slices had drifted out of step.
-func TestGetPosesDarknessAlignment(t *testing.T) {
+// TestGetPosesDarkness checks the get_poses wire format posestoarm reads:
+// every pose carries its own darkness, and only contact poses (at the surface
+// height) are dark enough to dwell on. Darkness now rides on each pose rather
+// than in a parallel list, so it cannot drift out of alignment - but it still
+// has to actually reach the response for any dwell to happen.
+func TestGetPosesDarkness(t *testing.T) {
 	// 4x4 all-black PNG: with denseN 2 every 2x2 block is fully black and
 	// collapses to one center dot with darkness 1.0.
 	path := filepath.Join(t.TempDir(), "src.png")
@@ -347,23 +347,20 @@ func TestGetPosesDarknessAlignment(t *testing.T) {
 	if !ok {
 		t.Fatalf("no poses in response: %v", resp)
 	}
-	levels, ok := resp["darkness_levels"].([]float64)
-	if !ok {
-		t.Fatalf("no darkness_levels in response: %v", resp)
-	}
-	if len(levels) != len(poses) {
-		t.Fatalf("darkness_levels has %d entries for %d poses", len(levels), len(poses))
-	}
 
 	dwells := 0
 	for i, raw := range poses {
 		p := raw.(map[string]any)
-		contact := p["z"].(float64) == surfaceZ
-		if levels[i] != 0 && !contact {
-			t.Errorf("pose %d at z=%v is not a contact pose but has darkness %v",
-				i, p["z"], levels[i])
+		darkness, ok := p["darkness"].(float64)
+		if !ok {
+			t.Fatalf("pose %d has no darkness: %v", i, p)
 		}
-		if contact && levels[i] == 1 {
+		contact := p["z"].(float64) == surfaceZ
+		if !contact && darkness != 0 {
+			t.Errorf("pose %d at z=%v is not a contact pose but has darkness %v",
+				i, p["z"], darkness)
+		}
+		if contact && darkness == 1 {
 			dwells++
 		}
 	}

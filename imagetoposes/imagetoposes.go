@@ -482,9 +482,6 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
 		poses := make([]poseEntry, 0, len(points)*2+2)
-		// darknesses is appended in lockstep with poses so the two stay
-		// index-aligned; only contact poses carry a non-zero level.
-		darknesses := make([]float64, 0, len(points)*2+2)
 
 		// Start and end at 10x hover height above the first point, so the
 		// arm approaches from safely above and retreats there when done.
@@ -492,9 +489,8 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 		if s.hoverMM > 0 && len(points) > 0 {
 			x, y := x0+points[0][0], y0+points[0][1]
 			z := s.surfaceZMM
-			homeEntry = &poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + 10*s.hoverMM}, downward)}
+			homeEntry = &poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + 10*s.hoverMM}, downward), darkness: 0}
 			poses = append(poses, *homeEntry)
-			darknesses = append(darknesses, 0)
 		}
 
 		var prevX, prevY float64
@@ -507,25 +503,22 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 			if s.hoverMM > 0 && s.maxTravelMM > 0 && i > 0 &&
 				math.Hypot(x-prevX, y-prevY) > s.maxTravelMM {
 				poses = append(poses, poseEntry{
-					pose:   spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward),
-					linear: true,
+					pose:     spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward),
+					linear:   true,
+					darkness: 0,
 				})
-				darknesses = append(darknesses, 0)
 			}
-			poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z}, downward)})
-			darknesses = append(darknesses, p[2])
+			poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z}, downward), darkness: p[2]})
 			if s.hoverMM > 0 {
-				poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward)})
-				darknesses = append(darknesses, 0)
+				poses = append(poses, poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + s.hoverMM}, downward), darkness: 0})
 			}
 			prevX, prevY = x, y
 		}
 		if homeEntry != nil {
 			poses = append(poses, *homeEntry)
-			darknesses = append(darknesses, 0)
 		}
 
-		return s.posesResponse(poses, spacingMM, darknesses), nil
+		return s.posesResponse(poses, spacingMM), nil
 	case "get_paper":
 		corners := make([]any, 0, 4)
 		for _, c := range s.paperCorners() {
@@ -571,22 +564,25 @@ func (s *imageToPosesCamera) overrides(m map[string]any) (uint8, float64, error)
 type poseEntry struct {
 	pose   spatialmath.Pose
 	linear bool
+	// 0 is not dark at all, 1 is full darkness
+	darkness float64
 }
 
 // posesResponse builds the get_poses response for a set of poses.
-func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64, darknesses []float64) map[string]any {
+func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64) map[string]any {
 	out := make([]any, len(poses))
 	for i, entry := range poses {
 		pt := entry.pose.Point()
 		out[i] = map[string]any{
-			"x":      pt.X,
-			"y":      pt.Y,
-			"z":      pt.Z,
-			"o_x":    0.0,
-			"o_y":    0.0,
-			"o_z":    -1.0,
-			"theta":  0.0,
-			"linear": entry.linear,
+			"x":        pt.X,
+			"y":        pt.Y,
+			"z":        pt.Z,
+			"o_x":      0.0,
+			"o_y":      0.0,
+			"o_z":      -1.0,
+			"theta":    0.0,
+			"linear":   entry.linear,
+			"darkness": entry.darkness,
 		}
 	}
 	return map[string]any{
@@ -595,7 +591,6 @@ func (s *imageToPosesCamera) posesResponse(poses []poseEntry, spacingMM float64,
 		"size_x_mm":        s.paperWMM - 2*s.marginMM,
 		"size_y_mm":        s.paperHMM - 2*s.marginMM,
 		"point_spacing_mm": spacingMM,
-		"darkness_levels":  darknesses,
 	}
 }
 

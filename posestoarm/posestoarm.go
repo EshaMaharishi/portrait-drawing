@@ -36,6 +36,8 @@ const maxDwellSeconds = 2
 type drawPose struct {
 	pose   spatialmath.Pose
 	linear bool
+	// Level of darkness, where 0 is not dark and 1 is full darkness
+	darkness float64
 }
 
 // Model is the full model triplet for this service.
@@ -246,7 +248,7 @@ func (s *posesToArm) finish(state string, completed, total int, err error) {
 func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	finish := s.finish
 
-	poses, darknessLevels, err := s.fetchPoses(ctx, posesCmd)
+	poses, err := s.fetchPoses(ctx, posesCmd)
 	if err != nil {
 		if ctx.Err() != nil {
 			finish(stateStopped, 0, 0, nil)
@@ -296,7 +298,7 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 		}
 		// Dwell on the dot: holding the pen still lets ink bleed into the
 		// paper, so darker dots get a longer pause.
-		dwell := time.Duration(darknessLevels[i] * maxDwellSeconds * float64(time.Second))
+		dwell := time.Duration(pose.darkness * maxDwellSeconds * float64(time.Second))
 		time.Sleep(dwell)
 	}
 
@@ -368,26 +370,27 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 
 // fetchPoses gets the poses from the camera by sending it posesCmd, a
 // get_poses command with any overrides.
-func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([]drawPose, []float64, error) {
+func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([]drawPose, error) {
 	resp, err := s.cam.DoCommand(ctx, posesCmd)
 	if err != nil {
-		return nil, nil, fmt.Errorf("camera get_poses command failed: %w", err)
+		return nil, fmt.Errorf("camera get_poses command failed: %w", err)
 	}
 	rawPoses, ok := resp["poses"].([]any)
 	if !ok {
-		return nil, nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
+		return nil, fmt.Errorf(`camera get_poses response has no "poses" list: %v`, resp)
 	}
 	if len(rawPoses) == 0 {
-		return nil, nil, errors.New("camera generated no poses")
+		return nil, errors.New("camera generated no poses")
 	}
 
 	poses := make([]drawPose, len(rawPoses))
 	for i, raw := range rawPoses {
 		p, ok := raw.(map[string]any)
 		if !ok {
-			return nil, nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
+			return nil, fmt.Errorf("unexpected pose format at index %d: %v", i, raw)
 		}
 		linear, _ := p["linear"].(bool)
+		darkness, _ := p["darkness"].(float64)
 		poses[i] = drawPose{
 			pose: spatialmath.NewPose(
 				r3.Vector{X: asFloat(p["x"]), Y: asFloat(p["y"]), Z: asFloat(p["z"])},
@@ -398,28 +401,11 @@ func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([
 					Theta: asFloat(p["theta"]),
 				},
 			),
-			linear: linear,
+			linear:   linear,
+			darkness: darkness,
 		}
 	}
-
-	// darknessLevels is always sized to match poses so callers can index it by
-	// pose without a bounds check. A DoCommand response that has crossed a gRPC
-	// boundary arrives as []any of float64 rather than []float64, so accept
-	// both shapes; levels that are missing or unparseable stay 0 (no dwell).
-	darknessLevels := make([]float64, len(poses))
-	switch raw := resp["darkness_levels"].(type) {
-	case []float64:
-		copy(darknessLevels, raw)
-	case []any:
-		for i, v := range raw {
-			if i >= len(darknessLevels) {
-				break
-			}
-			darknessLevels[i] = asFloat(v)
-		}
-	}
-
-	return poses, darknessLevels, nil
+	return poses, nil
 }
 
 func asFloat(v any) float64 {
