@@ -14,12 +14,38 @@
 
   let status = $state<DrawStatus>({ state: 'idle', completed: 0, total: 0, error: '' })
   let error = $state('')
+  // Whether the user has acknowledged a finished/stopped/failed draw, so the
+  // panel returns to its ready state.
+  let acknowledged = $state(false)
 
   const active = $derived(status.state === 'fetching' || status.state === 'drawing')
   $effect(() => {
     drawing = active
   })
   const percent = $derived(status.total > 0 ? Math.round((100 * status.completed) / status.total) : 0)
+  const finished = $derived(!acknowledged && (status.state === 'complete' || status.state === 'stopped' || status.state === 'error'))
+
+  // Time estimate from the observed pose rate since drawing started.
+  let rateStart = $state<{ t: number; completed: number } | undefined>()
+  let eta = $state('')
+  $effect(() => {
+    if (status.state !== 'drawing') {
+      rateStart = undefined
+      eta = ''
+      return
+    }
+    const now = Date.now()
+    if (!rateStart) {
+      rateStart = { t: now, completed: status.completed }
+      return
+    }
+    const done = status.completed - rateStart.completed
+    const secs = (now - rateStart.t) / 1000
+    if (done < 20 || secs < 10) return
+    const remaining = (status.total - status.completed) / (done / secs)
+    const mins = Math.round(remaining / 60)
+    eta = mins < 1 ? 'less than a minute left' : `about ${mins} min left`
+  })
 
   async function refreshStatus() {
     if (!arm.current) return
@@ -43,6 +69,7 @@
   async function draw() {
     if (!arm.current) return
     error = ''
+    acknowledged = false
     try {
       await doCommand(arm.current, { command: 'draw', threshold, point_spacing_mm: spacingMM })
       status = { state: 'fetching', completed: 0, total: 0, error: '' }
@@ -62,27 +89,50 @@
     }
     await refreshStatus()
   }
-
 </script>
 
-<section class="panel">
-  <h2>Draw</h2>
-  <div class="row">
-    <button class="big" onclick={draw} disabled={active || !arm.current}>
-      {active ? 'Drawing…' : 'Draw'}
-    </button>
-    <button class="big danger" onclick={stop} disabled={!arm.current}>Stop</button>
+<section class="step" class:active={active}>
+  <div class="step-head">
+    <span class="step-num">3</span>
+    <h2>Draw</h2>
   </div>
 
-  <div style="margin-top: 1rem">
-    <progress max="100" value={percent}></progress>
-    <div class="status">
-      <span class="state">{status.state}</span>
-      <span class="muted">
-        {#if status.state === 'fetching'}computing poses…{:else if status.total > 0}{status.completed} / {status.total} poses ({percent}%){:else}—{/if}
-      </span>
-    </div>
-    {#if status.state === 'error' && status.error}<p class="error">Draw failed: {status.error}</p>{/if}
+  <div class="row">
+    {#if finished}
+      <button class="huge" onclick={() => (acknowledged = true)}><span class="icon">↩</span> Draw another</button>
+    {:else}
+      <button class="huge" onclick={draw} disabled={active || !arm.current}>
+        <span class="icon">✏️</span>
+        {active ? 'Drawing…' : 'Draw my portrait'}
+      </button>
+    {/if}
+    <button class={active ? 'huge danger' : 'danger'} onclick={stop} disabled={!arm.current}>
+      <span class="icon">⏹</span> Stop
+    </button>
   </div>
-  {#if error}<p class="error">{error}</p>{/if}
+
+  {#if active || finished}
+    <div class="progress-wrap">
+      <progress max="100" value={percent}></progress>
+      <div class="readout">
+        {#if status.state === 'fetching'}
+          <span class="big">Getting ready…</span>
+          <span class="detail">turning the sketch into dots</span>
+        {:else if status.state === 'drawing'}
+          <span class="big">{percent}%</span>
+          <span class="detail">{status.completed.toLocaleString()} / {status.total.toLocaleString()} moves{eta ? ` · ${eta}` : ''}</span>
+        {:else if status.state === 'complete'}
+          <span class="big ok">Done! 🎉</span>
+          <span class="detail">{status.total.toLocaleString()} moves</span>
+        {:else if status.state === 'stopped'}
+          <span class="big bad">Stopped</span>
+          <span class="detail">after {status.completed.toLocaleString()} of {status.total.toLocaleString()} moves</span>
+        {:else if status.state === 'error'}
+          <span class="big bad">Something went wrong</span>
+        {/if}
+      </div>
+      {#if status.state === 'error' && status.error}<div class="banner error">{status.error}</div>{/if}
+    </div>
+  {/if}
+  {#if error}<div class="banner error">{error}</div>{/if}
 </section>

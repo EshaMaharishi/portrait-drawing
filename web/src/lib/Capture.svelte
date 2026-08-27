@@ -1,6 +1,6 @@
 <script lang="ts">
   import { CameraImage, createResourceClient } from '@viamrobotics/svelte-sdk'
-  import { CameraClient, SwitchClient } from '@viamrobotics/sdk'
+  import { CameraClient } from '@viamrobotics/sdk'
   import { RESOURCES, errorMessage } from '../viam'
 
   let {
@@ -10,37 +10,10 @@
     locked = false,
   }: { partID: string; threshold: number; spacingMM: number; locked?: boolean } = $props()
 
-  // These feeds don't depend on the sliders; <CameraImage> polls them.
-  const feeds = [
-    { name: RESOURCES.camera, label: 'Camera', interval: 500 },
-    { name: RESOURCES.personOnly, label: 'Background removed', interval: 1000 },
-    { name: RESOURCES.sketched, label: 'Sketch', interval: 2000 },
-  ]
-
   const imageToPoses = createResourceClient(CameraClient, () => partID, () => RESOURCES.imageToPoses)
-  const positions = createResourceClient(SwitchClient, () => partID, () => RESOURCES.positions)
-
-  // The picture-taking pose is the last preset on the position switch.
-  let movingArm = $state(false)
-  let moveError = $state('')
-  async function goToPicturePosition() {
-    const client = positions.current
-    if (!client) return
-    movingArm = true
-    moveError = ''
-    try {
-      const [count] = await client.getNumberOfPositions()
-      if (count < 1) throw new Error(`${RESOURCES.positions} has no positions configured`)
-      await client.setPosition(count - 1)
-    } catch (err) {
-      moveError = errorMessage(err)
-    } finally {
-      movingArm = false
-    }
-  }
 
   // The dot preview is fetched by hand so the slider values can be passed as
-  // `extra` overrides — the same values draw/visualize use. It is recomputed
+  // `extra` overrides — the same values Draw uses. It is recomputed
   // server-side per request, so: debounce slider moves, abort a request that
   // a newer slider value has made stale, and otherwise refresh slowly.
   const PREVIEW_INTERVAL_MS = 5000
@@ -95,47 +68,49 @@
   })
 </script>
 
-<section class="panel">
-  <h2>Capture &amp; preview</h2>
-  <div class="row" style="margin: 0 0 0.75rem">
-    <button class="secondary" onclick={goToPicturePosition} disabled={movingArm || locked || !positions.current}>
-      {movingArm ? 'Moving arm…' : 'Go to picture-taking position'}
-    </button>
-    {#if moveError}<span class="error">{moveError}</span>{/if}
+<section class="step" class:locked class:active={!locked}>
+  <div class="step-head">
+    <span class="step-num">2</span>
+    <h2>Check the picture and adjust</h2>
   </div>
-  <div class="grid">
-    {#each feeds as feed (feed.name)}
-      <figure>
-        <CameraImage {partID} name={feed.name} refetchInterval={feed.interval} width="100%" alt={feed.label} />
-        <figcaption><span>{feed.label}</span><span class="muted">{feed.name}</span></figcaption>
-      </figure>
-    {/each}
-    <figure class:updating={previewUpdating}>
+
+  <div class="tiles">
+    <figure class="tile hero">
+      <CameraImage {partID} name={RESOURCES.sketched} refetchInterval={2000} width="100%" alt="Sketch" />
+      <figcaption><span>✏️ Sketch</span></figcaption>
+    </figure>
+    <figure class="tile hero">
       {#if previewError}
-        <p class="error" style="padding: 0.6rem; margin: 0; background: #fff">{previewError}</p>
+        <div class="banner error" style="margin: 0.75rem">{previewError}</div>
       {:else}
         <img src={previewSrc} alt="Dot preview (as drawn)" />
       {/if}
-      <figcaption>
-        <span>Dot preview</span>
-        <span class="muted">{previewUpdating ? 'updating…' : RESOURCES.imageToPoses}</span>
-      </figcaption>
+      {#if previewUpdating}<span class="overlay">updating…</span>{/if}
+      <figcaption><span>🤖 What the robot will draw</span></figcaption>
+    </figure>
+    <figure class="tile small">
+      <CameraImage {partID} name={RESOURCES.camera} refetchInterval={500} width="100%" alt="Camera" />
+      <figcaption><span>Camera</span></figcaption>
+    </figure>
+    <figure class="tile small">
+      <CameraImage {partID} name={RESOURCES.personOnly} refetchInterval={1000} width="100%" alt="Background removed" />
+      <figcaption><span>Background removed</span></figcaption>
     </figure>
   </div>
 
-  <div class="row">
+  <div class="sliders">
     <label class="slider">
-      Threshold (darker than this becomes a dot) <span>{threshold}</span>
+      <span>Darkness</span>
+      <span class="value">{threshold}</span>
       <input type="range" min="0" max="255" step="1" bind:value={threshold} disabled={locked} />
+      <span class="hint">Higher keeps more of the sketch (more dots, longer drawing).</span>
     </label>
     <label class="slider">
-      Point spacing (mm) <span>{spacingMM.toFixed(1)}</span>
+      <span>Dot spacing</span>
+      <span class="value">{spacingMM.toFixed(1)} mm</span>
       <input type="range" min="0.5" max="5" step="0.1" bind:value={spacingMM} disabled={locked} />
+      <span class="hint">Smaller is finer detail; larger draws faster.</span>
     </label>
-    {#if locked}<span class="muted">Sliders are locked while drawing.</span>{/if}
   </div>
-  <p class="muted">
-    The sliders drive the dot preview and <em>Draw</em>. The drawing area, rotation and hover come
-    from the <code>{RESOURCES.imageToPoses}</code> config.
-  </p>
+  {#if locked}<p class="hint" style="margin-top: 0.5rem">Settings are locked while the robot is drawing.</p>{/if}
 </section>

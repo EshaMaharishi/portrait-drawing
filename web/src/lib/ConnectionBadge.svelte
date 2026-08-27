@@ -3,32 +3,28 @@
   import { MachineConnectionEvent, type DialConf } from '@viamrobotics/sdk'
 
   let { partID, dialConf }: { partID: string; dialConf: DialConf } = $props()
-  const host = $derived(dialConf.host)
   const connection = useRobotConnection(() => partID)
 
+  const connected = $derived(connection.connectionStatus === MachineConnectionEvent.CONNECTED)
   const label = $derived.by(() => {
     switch (connection.connectionStatus) {
-      case MachineConnectionEvent.CONNECTED: return 'Connected'
+      case MachineConnectionEvent.CONNECTED: return 'Robot connected'
       case MachineConnectionEvent.CONNECTING: return 'Connecting…'
       case MachineConnectionEvent.DISCONNECTING: return 'Disconnecting…'
-      default: return 'Disconnected'
+      default: return 'Robot disconnected'
     }
   })
-  const cls = $derived(
-    connection.connectionStatus === MachineConnectionEvent.CONNECTED ? 'ok'
-      : connection.connectionStatus === MachineConnectionEvent.CONNECTING ? ''
-      : 'bad',
-  )
+  const cls = $derived(connected ? 'ok' : connection.connectionStatus === MachineConnectionEvent.CONNECTING ? '' : 'bad')
   $effect(() => {
     if (connection.error) console.error('viam connection error', connection.error)
   })
 </script>
 
-<div style="text-align: right">
-  <span class="badge {cls}" title={host}>{label} · {host}</span>
-  {#if connection.error}
-    <p class="error" style="margin: 0.4rem 0 0">{connection.error.message}</p>
+<div class="conn">
+  <span class="badge {cls}" title="{dialConf.host}{connection.error ? ` — ${connection.error.message}` : ''}">
+    {connected ? '●' : '○'} {label}
+  </span>
+  {#if !connected}
+    <button class="secondary small" onclick={() => connection.connect(dialConf)}>Reconnect</button>
   {/if}
-  <button class="secondary" style="margin-top: 0.4rem; padding: 0.3rem 0.7rem; font-size: 0.8rem"
-    onclick={() => connection.connect(dialConf)}>Reconnect</button>
 </div>
