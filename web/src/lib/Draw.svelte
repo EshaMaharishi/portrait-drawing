@@ -14,16 +14,14 @@
 
   let status = $state<DrawStatus>({ state: 'idle', completed: 0, total: 0, error: '' })
   let error = $state('')
-  // Whether the user has acknowledged a finished/stopped/failed draw, so the
-  // panel returns to its ready state.
-  let acknowledged = $state(false)
 
   const active = $derived(status.state === 'fetching' || status.state === 'drawing')
   $effect(() => {
     drawing = active
   })
   const percent = $derived(status.total > 0 ? Math.round((100 * status.completed) / status.total) : 0)
-  const finished = $derived(!acknowledged && (status.state === 'complete' || status.state === 'stopped' || status.state === 'error'))
+  // Keep the last result visible until the next draw starts.
+  const finished = $derived(status.state === 'complete' || status.state === 'stopped' || status.state === 'error')
 
   // Time estimate from the observed pose rate since drawing started.
   let rateStart = $state<{ t: number; completed: number } | undefined>()
@@ -69,7 +67,6 @@
   async function draw() {
     if (!arm.current) return
     error = ''
-    acknowledged = false
     try {
       await doCommand(arm.current, { command: 'draw', threshold, point_spacing_mm: spacingMM })
       status = { state: 'fetching', completed: 0, total: 0, error: '' }
@@ -94,18 +91,14 @@
 <section class="step" class:active={active}>
   <div class="step-head">
     <span class="step-num">3</span>
-    <h2>Draw</h2>
+    <h2>Draw my portrait</h2>
   </div>
 
   <div class="row nowrap">
-    {#if finished}
-      <button class="huge" onclick={() => (acknowledged = true)}><span class="icon">↩</span> Draw another</button>
-    {:else}
-      <button class="huge" onclick={draw} disabled={active || !arm.current}>
-        <span class="icon">✏️</span>
-        {active ? 'Drawing…' : 'Draw my portrait'}
-      </button>
-    {/if}
+    <button class="huge" onclick={draw} disabled={active || !arm.current}>
+      <span class="icon">✏️</span>
+      {active ? 'Drawing…' : 'Draw my portrait'}
+    </button>
     <button class={active ? 'huge danger' : 'danger'} onclick={stop} disabled={!arm.current}>
       <span class="icon">⏹</span> Stop
     </button>
