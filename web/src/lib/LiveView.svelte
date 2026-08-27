@@ -3,7 +3,23 @@
   import { CameraClient } from '@viamrobotics/sdk'
   import { RESOURCES, errorMessage } from '../viam'
 
-  let { partID, threshold, spacingMM }: { partID: string; threshold: number; spacingMM: number } = $props()
+  let {
+    partID,
+    threshold,
+    spacingMM,
+    drawing = false,
+  }: { partID: string; threshold: number; spacingMM: number; drawing?: boolean } = $props()
+
+  // While a draw runs, show a frozen copy of the preview as it was when Draw
+  // was clicked, instead of the live feeds.
+  let frozenSrc = $state<string | undefined>()
+  $effect(() => {
+    if (drawing) {
+      if (!frozenSrc) frozenSrc = previewSrc
+    } else {
+      frozenSrc = undefined
+    }
+  })
 
   const imageToPoses = createResourceClient(CameraClient, () => partID, () => RESOURCES.imageToPoses)
 
@@ -50,10 +66,11 @@
   }
 
   $effect(() => {
-    // Re-run when the client appears or a slider moves.
+    // Re-run when the client appears or a slider moves; pause while drawing.
     void imageToPoses.current
     void threshold
     void spacingMM
+    if (drawing) return
     const debounce = setTimeout(refreshPreview, PREVIEW_DEBOUNCE_MS)
     const interval = setInterval(refreshPreview, PREVIEW_INTERVAL_MS)
     return () => {
@@ -64,6 +81,12 @@
 </script>
 
 <section class="views">
+  {#if drawing}
+    <figure class="tile hero drawing">
+      <img src={frozenSrc ?? previewSrc} alt="What the robot is drawing" />
+      <figcaption><span>🤖 Drawing this</span></figcaption>
+    </figure>
+  {:else}
   <div class="tiles">
     <figure class="tile small">
       <CameraImage {partID} name={RESOURCES.camera} refetchInterval={500} width="100%" alt="Camera" />
@@ -87,4 +110,5 @@
       <figcaption><span>🤖 What the robot will draw</span></figcaption>
     </figure>
   </div>
+  {/if}
 </section>

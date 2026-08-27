@@ -43,7 +43,7 @@
         <Adjust bind:threshold bind:spacingMM locked={drawing} />
         <Draw partID={connection.machineId} {threshold} {spacingMM} bind:drawing />
       </div>
-      <LiveView partID={connection.machineId} {threshold} {spacingMM} />
+      <LiveView partID={connection.machineId} {threshold} {spacingMM} {drawing} />
     </div>
   </ViamProvider>
 {:else}

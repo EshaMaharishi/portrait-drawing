@@ -63,6 +63,8 @@ button.small { font-size: 0.9rem; min-height: 2.2rem; padding: 0.3rem 0.8rem; fo
 .tile img { width: 100%; height: auto; display: block; background: #fff; aspect-ratio: 4 / 3; object-fit: contain; }
 .tile.hero img { aspect-ratio: 4 / 3; }
 .tile.small img { aspect-ratio: 16 / 7; }
+.tile.drawing img { aspect-ratio: auto; max-height: 640px; }
+.tile.drawing figcaption { font-size: 1.2rem; }
 .tile figcaption { padding: 0.45rem 0.75rem; font-weight: 700; font-size: 1rem; border-top: 2px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
 .tile.small figcaption { font-size: 0.85rem; padding: 0.3rem 0.6rem; }
 .tile .overlay { position: absolute; inset: 0 0 auto 0; margin: 0.6rem; padding: 0.3rem 0.7rem; width: max-content; border-radius: 999px; background: var(--border-strong); color: #fff; font-weight: 700; font-size: 0.9rem; }
