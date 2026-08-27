@@ -148,7 +148,7 @@ func newPosesToArm(
 //	"state" (idle, fetching, drawing, showing_paper, stopped, complete, or
 //	error), "completed" and "total" counts (poses for a draw, corners for
 //	show_paper), and "error" (empty unless state is error).
-func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	command, ok := cmd["command"].(string)
 	if !ok {
 		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
@@ -166,12 +166,12 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 		if err := s.startAction(stateFetching, func(ctx context.Context) { s.runDraw(ctx, posesCmd) }); err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"status": "started"}, nil
+		return map[string]any{"status": "started"}, nil
 	case "show_paper":
 		if err := s.startAction(stateShowingPaper, s.runShowPaper); err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"status": "started"}, nil
+		return map[string]any{"status": "started"}, nil
 	case "stop":
 		s.mu.Lock()
 		cancel := s.drawCancel
@@ -243,7 +243,7 @@ func (s *posesToArm) finish(state string, completed, total int, err error) {
 
 // runDraw fetches the poses and moves the arm through them, recording
 // progress in the service's state until it finishes, fails, or is cancelled.
-func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{}) {
+func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	finish := s.finish
 
 	poses, darknessLevels, err := s.fetchPoses(ctx, posesCmd)
@@ -307,12 +307,12 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{
 // runShowPaper asks the camera where the paper is and dips the pen to hover
 // height above each corner in turn, so a sheet can be placed under it.
 func (s *posesToArm) runShowPaper(ctx context.Context) {
-	resp, err := s.cam.DoCommand(ctx, map[string]interface{}{"command": "get_paper"})
+	resp, err := s.cam.DoCommand(ctx, map[string]any{"command": "get_paper"})
 	if err != nil {
 		s.finish(stateError, 0, 0, fmt.Errorf("camera get_paper command failed: %w", err))
 		return
 	}
-	rawCorners, ok := resp["corners"].([]interface{})
+	rawCorners, ok := resp["corners"].([]any)
 	if !ok || len(rawCorners) == 0 {
 		s.finish(stateError, 0, 0, fmt.Errorf(`camera get_paper response has no "corners" list: %v`, resp))
 		return
@@ -336,7 +336,7 @@ func (s *posesToArm) runShowPaper(ctx context.Context) {
 		return err
 	}
 	for i, raw := range rawCorners {
-		c, ok := raw.([]interface{})
+		c, ok := raw.([]any)
 		if !ok || len(c) != 2 {
 			s.finish(stateError, i, len(rawCorners), fmt.Errorf("unexpected corner format at index %d: %v", i, raw))
 			return

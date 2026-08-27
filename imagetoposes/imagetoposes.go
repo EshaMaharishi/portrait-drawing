@@ -449,15 +449,11 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]an
 //	followed by an additional pose that far above it, so the pen lifts
 //	between points, and the sequence starts and ends with a pose at 10x
 //	hover height above the first point.
-<<<<<<< HEAD
 //	{"command": "get_paper"} - returns the paper's four corners in world x/y
 //	("corners", going around from the near edge), plus paper_x_mm,
 //	paper_width_mm, paper_height_mm, margin_mm, surface_z_mm and
 //	hover_above_mm, for showing where the paper goes.
-func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-=======
 func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
->>>>>>> 8223084 (Updated tests)
 	command, ok := cmd["command"].(string)
 	if !ok {
 		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
@@ -531,11 +527,11 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) 
 
 		return s.posesResponse(poses, spacingMM, darknesses), nil
 	case "get_paper":
-		corners := make([]interface{}, 0, 4)
+		corners := make([]any, 0, 4)
 		for _, c := range s.paperCorners() {
-			corners = append(corners, []interface{}{c[0], c[1]})
+			corners = append(corners, []any{c[0], c[1]})
 		}
-		return map[string]interface{}{
+		return map[string]any{
 			"corners":         corners,
 			"paper_x_mm":      s.paperXMM,
 			"paper_width_mm":  s.paperWMM,
@@ -877,7 +873,7 @@ func renderPaperPreview(points [][3]float64, paperWMM, paperHMM, marginMM, spaci
 // drawRect strokes the rectangle with corners (x0,y0)-(x1,y1) inclusive,
 // thick pixels wide, growing inward.
 func drawRect(canvas *image.Gray, x0, y0, x1, y1, thick int, c color.Gray) {
-	for t := 0; t < thick; t++ {
+	for t := range thick {
 		for x := x0 + t; x <= x1-t; x++ {
 			canvas.SetGray(x, y0+t, c)
 			canvas.SetGray(x, y1-t, c)

@@ -4,8 +4,8 @@ import (
 	"context"
 	"image"
 	"image/color"
-	"math"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,8 +16,8 @@ import (
 func TestImageToPoints(t *testing.T) {
 	// 4x2 image: black pixels at (0,0) and (3,1), everything else white.
 	img := image.NewGray(image.Rect(0, 0, 4, 2))
-	for y := 0; y < 2; y++ {
-		for x := 0; x < 4; x++ {
+	for y := range 2 {
+		for x := range 4 {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
@@ -137,7 +137,7 @@ func TestRenderPaperPreview(t *testing.T) {
 	// 100mm x 50mm paper with a 10mm margin at 4px/mm gives a 400x200 canvas.
 	// One point at (25, 25) in the drawing area with 2mm spacing lands at
 	// pixel (40+100, 40+100).
-	img := renderPaperPreview([][2]float64{{25, 25}}, 100, 50, 10, 2)
+	img := renderPaperPreview([][3]float64{{25, 25}}, 100, 50, 10, 2)
 
 	bounds := img.Bounds()
 	if bounds.Dx() != 400 || bounds.Dy() != 200 {
@@ -161,8 +161,8 @@ func TestTransformMatchesLegacyRotate270Mirror(t *testing.T) {
 	// The defaults (mirror, image_up "+x") must reproduce the previous
 	// behaviour of rotating 270 degrees clockwise and then mirroring.
 	img := image.NewGray(image.Rect(0, 0, 3, 2))
-	for y := 0; y < 2; y++ {
-		for x := 0; x < 3; x++ {
+	for y := range 2 {
+		for x := range 3 {
 			img.SetGray(x, y, color.Gray{Y: uint8(40*x + 100*y)})
 		}
 	}
@@ -233,8 +233,8 @@ func TestImageToPointsDenseBlocksKeepsPartial(t *testing.T) {
 
 func TestImageToPointsAllWhite(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 3, 3))
-	for y := 0; y < 3; y++ {
-		for x := 0; x < 3; x++ {
+	for y := range 3 {
+		for x := range 3 {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
@@ -248,8 +248,8 @@ func TestImageToPointsDownsamples(t *testing.T) {
 	// Left cell has two black pixels (average 127.5 <= 128, kept); right cell
 	// is all white (dropped).
 	img := image.NewGray(image.Rect(0, 0, 4, 2))
-	for y := 0; y < 2; y++ {
-		for x := 0; x < 4; x++ {
+	for y := range 2 {
+		for x := range 4 {
 			img.SetGray(x, y, color.Gray{Y: 255})
 		}
 	}
@@ -305,6 +305,9 @@ func TestCropToContent(t *testing.T) {
 	}
 	if cropToContent(blank, 128).Bounds() != blank.Bounds() {
 		t.Error("expected a blank image to be returned unchanged")
+	}
+}
+
 // TestGetPosesDarknessAlignment guards the invariant posestoarm relies on:
 // darkness_levels is index-aligned with poses and the same length, so a dwell
 // can be looked up by pose index. Only contact poses (at the surface height)
@@ -327,8 +330,8 @@ func TestGetPosesDarknessAlignment(t *testing.T) {
 	cam := &imageToPosesCamera{
 		logger:     logging.NewTestLogger(t),
 		imagePath:  path,
-		sizeXMM:    254.0,
-		sizeYMM:    254.0,
+		paperWMM:   254.0,
+		paperHMM:   254.0,
 		spacingMM:  63.5,
 		threshold:  128,
 		hoverMM:    5, // generates the leading/trailing home poses and hovers
