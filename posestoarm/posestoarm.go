@@ -27,6 +27,10 @@ const (
 	linearOrientationToleranceDegs = 5.0
 )
 
+// maxDwellSeconds is how long the pen pauses on a fully dark (darkness 1.0)
+// dot to let ink bleed in; dwell scales linearly with the dot's darkness.
+const maxDwellSeconds = 2
+
 // drawPose is one pose in the drawing sequence; linear marks poses that
 // should be reached on a straight-line-constrained path.
 type drawPose struct {
@@ -290,8 +294,10 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]interface{
 		if (i+1)%100 == 0 {
 			s.logger.Infof("drew %d of %d poses", i+1, len(poses))
 		}
-		sleepDuration := 0.5 * darknessLevels[i] * float64(time.Second)
-		time.Sleep(time.Duration(sleepDuration))
+		// Dwell on the dot: holding the pen still lets ink bleed into the
+		// paper, so darker dots get a longer pause.
+		dwell := time.Duration(darknessLevels[i] * maxDwellSeconds * float64(time.Second))
+		time.Sleep(dwell)
 	}
 
 	s.logger.Infof("drawing complete: %d poses", len(poses))
@@ -396,9 +402,21 @@ func (s *posesToArm) fetchPoses(ctx context.Context, posesCmd map[string]any) ([
 		}
 	}
 
-	darknessLevels, ok := resp["darkness_levels"].([]float64)
-	if !ok {
-		darknessLevels = make([]float64, len(poses))
+	// darknessLevels is always sized to match poses so callers can index it by
+	// pose without a bounds check. A DoCommand response that has crossed a gRPC
+	// boundary arrives as []any of float64 rather than []float64, so accept
+	// both shapes; levels that are missing or unparseable stay 0 (no dwell).
+	darknessLevels := make([]float64, len(poses))
+	switch raw := resp["darkness_levels"].(type) {
+	case []float64:
+		copy(darknessLevels, raw)
+	case []any:
+		for i, v := range raw {
+			if i >= len(darknessLevels) {
+				break
+			}
+			darknessLevels[i] = asFloat(v)
+		}
 	}
 
 	return poses, darknessLevels, nil

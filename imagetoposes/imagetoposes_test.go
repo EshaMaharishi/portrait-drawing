@@ -1,10 +1,16 @@
 package imagetoposes
 
 import (
+	"context"
 	"image"
 	"image/color"
 	"math"
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"go.viam.com/rdk/logging"
 )
 
 func TestImageToPoints(t *testing.T) {
@@ -27,9 +33,9 @@ func TestImageToPoints(t *testing.T) {
 
 	// Long side is 4px -> 63.5mm per pixel. Height is 2px = 127mm, so the
 	// image is centered vertically with a 63.5mm offset.
-	want := [][2]float64{
-		{31.75, 95.25},   // pixel (0,0): center at 0.5*63.5, 63.5 + 0.5*63.5
-		{222.25, 158.75}, // pixel (3,1): center at 3.5*63.5, 63.5 + 1.5*63.5
+	want := [][3]float64{
+		{31.75, 95.25, 0},   // pixel (0,0): center at 0.5*63.5, 63.5 + 0.5*63.5
+		{222.25, 158.75, 0}, // pixel (3,1): center at 3.5*63.5, 63.5 + 1.5*63.5
 	}
 	for i, p := range points {
 		if p != want[i] {
@@ -57,11 +63,11 @@ func TestImageToPointsNearestNeighborOrder(t *testing.T) {
 	// The walk starts at (0,0) (closest to the top-left corner), then its
 	// neighbor (1,0) one cell away, then (0,2) (sqrt(5) cells from (1,0),
 	// closer than (3,2) at sqrt(8)), then (3,2).
-	want := [][2]float64{
-		{31.75, 63.5},
-		{95.25, 63.5},
-		{31.75, 190.5},
-		{222.25, 190.5},
+	want := [][3]float64{
+		{31.75, 63.5, 0},
+		{95.25, 63.5, 0},
+		{31.75, 190.5, 0},
+		{222.25, 190.5, 0},
 	}
 	if len(points) != len(want) {
 		t.Fatalf("expected %d points, got %d: %v", len(want), len(points), points)
@@ -197,11 +203,11 @@ func TestImageToPointsDenseBlocks(t *testing.T) {
 	// Kept cells: (1,1), (3,1), (1,3), (3,3). The walk starts at (1,1); the
 	// two-cell jumps to (1,3) and (3,1) tie, and the ring search checks rows
 	// above/below before columns, so (1,3) wins, then (3,3), then (3,1).
-	want := [][2]float64{
-		{95.25, 95.25},
-		{95.25, 222.25},
-		{222.25, 222.25},
-		{222.25, 95.25},
+	want := [][3]float64{
+		{95.25, 95.25, 1},
+		{95.25, 222.25, 1},
+		{222.25, 222.25, 1},
+		{222.25, 95.25, 1},
 	}
 	if len(points) != len(want) {
 		t.Fatalf("expected %d points, got %d: %v", len(want), len(points), points)
@@ -254,7 +260,7 @@ func TestImageToPointsDownsamples(t *testing.T) {
 
 	// The image spans 254mm x 127mm, so yOffset is 63.5mm. The kept cell's
 	// center is at (0.5*127, 63.5 + 0.5*127).
-	want := [2]float64{63.5, 127.0}
+	want := [3]float64{63.5, 127.0, 0}
 	if len(points) != 1 || points[0] != want {
 		t.Fatalf("expected exactly [%v], got %v", want, points)
 	}
@@ -299,5 +305,66 @@ func TestCropToContent(t *testing.T) {
 	}
 	if cropToContent(blank, 128).Bounds() != blank.Bounds() {
 		t.Error("expected a blank image to be returned unchanged")
+// TestGetPosesDarknessAlignment guards the invariant posestoarm relies on:
+// darkness_levels is index-aligned with poses and the same length, so a dwell
+// can be looked up by pose index. Only contact poses (at the surface height)
+// may carry a non-zero level - a hover or home pose that picked one up would
+// mean the two slices had drifted out of step.
+func TestGetPosesDarknessAlignment(t *testing.T) {
+	// 4x4 all-black PNG: with denseN 2 every 2x2 block is fully black and
+	// collapses to one center dot with darkness 1.0.
+	path := filepath.Join(t.TempDir(), "src.png")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, image.NewGray(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	const surfaceZ = 12.5
+	cam := &imageToPosesCamera{
+		logger:     logging.NewTestLogger(t),
+		imagePath:  path,
+		sizeXMM:    254.0,
+		sizeYMM:    254.0,
+		spacingMM:  63.5,
+		threshold:  128,
+		hoverMM:    5, // generates the leading/trailing home poses and hovers
+		denseN:     2,
+		surfaceZMM: surfaceZ,
+	}
+
+	resp, err := cam.DoCommand(context.Background(), map[string]any{"command": "get_poses"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poses, ok := resp["poses"].([]any)
+	if !ok {
+		t.Fatalf("no poses in response: %v", resp)
+	}
+	levels, ok := resp["darkness_levels"].([]float64)
+	if !ok {
+		t.Fatalf("no darkness_levels in response: %v", resp)
+	}
+	if len(levels) != len(poses) {
+		t.Fatalf("darkness_levels has %d entries for %d poses", len(levels), len(poses))
+	}
+
+	dwells := 0
+	for i, raw := range poses {
+		p := raw.(map[string]any)
+		contact := p["z"].(float64) == surfaceZ
+		if levels[i] != 0 && !contact {
+			t.Errorf("pose %d at z=%v is not a contact pose but has darkness %v",
+				i, p["z"], levels[i])
+		}
+		if contact && levels[i] == 1 {
+			dwells++
+		}
+	}
+	if dwells != 4 {
+		t.Errorf("expected 4 collapsed dots at darkness 1.0, got %d", dwells)
 	}
 }

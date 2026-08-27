@@ -330,8 +330,8 @@ func mirrorImage(img image.Image) image.Image {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	out := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			out.Set(x, y, img.At(bounds.Min.X+w-1-x, bounds.Min.Y+y))
 		}
 	}
@@ -351,22 +351,22 @@ func rotateImage(img image.Image, degrees int) image.Image {
 	switch degrees {
 	case 90:
 		out = image.NewRGBA(image.Rect(0, 0, h, w))
-		for y := 0; y < w; y++ {
-			for x := 0; x < h; x++ {
+		for y := range w {
+			for x := range h {
 				out.Set(x, y, img.At(bounds.Min.X+y, bounds.Min.Y+h-1-x))
 			}
 		}
 	case 180:
 		out = image.NewRGBA(image.Rect(0, 0, w, h))
-		for y := 0; y < h; y++ {
-			for x := 0; x < w; x++ {
+		for y := range h {
+			for x := range w {
 				out.Set(x, y, img.At(bounds.Min.X+w-1-x, bounds.Min.Y+h-1-y))
 			}
 		}
 	case 270:
 		out = image.NewRGBA(image.Rect(0, 0, h, w))
-		for y := 0; y < w; y++ {
-			for x := 0; x < h; x++ {
+		for y := range w {
+			for x := range h {
 				out.Set(x, y, img.At(bounds.Min.X+w-1-y, bounds.Min.Y+x))
 			}
 		}
@@ -387,7 +387,7 @@ func rotateImage(img image.Image, degrees int) image.Image {
 func (s *imageToPosesCamera) Images(
 	ctx context.Context,
 	filterSourceNames []string,
-	extra map[string]interface{},
+	extra map[string]any,
 ) ([]camera.NamedImage, resource.ResponseMetadata, error) {
 	threshold, spacingMM, err := s.overrides(extra)
 	if err != nil {
@@ -417,7 +417,7 @@ func (s *imageToPosesCamera) Images(
 }
 
 // NextPointCloud is unimplemented; this camera only serves 2D images.
-func (s *imageToPosesCamera) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
+func (s *imageToPosesCamera) NextPointCloud(ctx context.Context, extra map[string]any) (pointcloud.PointCloud, error) {
 	return nil, errors.New("point clouds are not supported")
 }
 
@@ -431,7 +431,7 @@ func (s *imageToPosesCamera) Properties(ctx context.Context) (camera.Properties,
 }
 
 // Geometries returns no geometries; this camera has no physical footprint.
-func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
+func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]any) ([]spatialmath.Geometry, error) {
 	return nil, nil
 }
 
@@ -449,11 +449,15 @@ func (s *imageToPosesCamera) Geometries(ctx context.Context, extra map[string]in
 //	followed by an additional pose that far above it, so the pen lifts
 //	between points, and the sequence starts and ends with a pose at 10x
 //	hover height above the first point.
+<<<<<<< HEAD
 //	{"command": "get_paper"} - returns the paper's four corners in world x/y
 //	("corners", going around from the near edge), plus paper_x_mm,
 //	paper_width_mm, paper_height_mm, margin_mm, surface_z_mm and
 //	hover_above_mm, for showing where the paper goes.
 func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+=======
+func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
+>>>>>>> 8223084 (Updated tests)
 	command, ok := cmd["command"].(string)
 	if !ok {
 		return nil, fmt.Errorf(`expected a "command" string in the command map, got: %v`, cmd)
@@ -482,7 +486,9 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 
 		downward := &spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0}
 		poses := make([]poseEntry, 0, len(points)*2+2)
-		darknesses := make([]float64, len(poses))
+		// darknesses is appended in lockstep with poses so the two stay
+		// index-aligned; only contact poses carry a non-zero level.
+		darknesses := make([]float64, 0, len(points)*2+2)
 
 		// Start and end at 10x hover height above the first point, so the
 		// arm approaches from safely above and retreats there when done.
@@ -492,6 +498,7 @@ func (s *imageToPosesCamera) DoCommand(ctx context.Context, cmd map[string]inter
 			z := s.surfaceZMM
 			homeEntry = &poseEntry{pose: spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z + 10*s.hoverMM}, downward)}
 			poses = append(poses, *homeEntry)
+			darknesses = append(darknesses, 0)
 		}
 
 		var prevX, prevY float64
@@ -682,12 +689,12 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 
 	// Mark the dark cells.
 	dark := make([]grayscale_color, cols*rows)
-	for cy := 0; cy < rows; cy++ {
-		for cx := 0; cx < cols; cx++ {
+	for cy := range rows {
+		for cx := range cols {
 			cell := cy*cols + cx
 			if counts[cell] > 0 {
 				avg := sums[cell] / float64(counts[cell])
-				if avg <= float64(max(0, threshold-100)) {
+				if avg <= float64(max(0, threshold/2)) {
 					dark[cell] = grayscale_black
 				} else if avg <= float64(threshold) {
 					dark[cell] = grayscale_gray
@@ -705,8 +712,8 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 	// top-left corner (0, 0) to start from.
 	total := 0
 	startCX, startCY, bestStart := 0, 0, math.MaxFloat64
-	for cy := 0; cy < rows; cy++ {
-		for cx := 0; cx < cols; cx++ {
+	for cy := range rows {
+		for cx := range cols {
 			if dark[cy*cols+cx] == grayscale_white {
 				continue
 			}
@@ -745,8 +752,10 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 // partial blocks at the right/bottom edges and blocks with any light cell
 // are left untouched.
 func collapseDenseBlocks(dark []grayscale_color, cols, rows, n int) []float64 {
+	// Callers index the result by cell, so return a zero (no dwell) level for
+	// every cell rather than nil when there is nothing to collapse.
 	if n <= 1 {
-		return nil
+		return make([]float64, len(dark))
 	}
 	darknesses := make([]float64, len(dark))
 	for by := 0; by+n <= rows; by += n {
@@ -791,10 +800,7 @@ func collapseDenseBlocks(dark []grayscale_color, cols, rows, n int) []float64 {
 // (fromCX, fromCY), searching outward ring by ring. A match found in ring r
 // is only accepted once no closer match can exist in a farther ring.
 func nearestDark(dark []grayscale_color, cols, rows, fromCX, fromCY int) (int, int) {
-	maxR := cols
-	if rows > maxR {
-		maxR = rows
-	}
+	maxR := max(rows, cols)
 	bestCX, bestCY, bestD := -1, -1, math.MaxInt
 	check := func(cx, cy int) {
 		if cx < 0 || cx >= cols || cy < 0 || cy >= rows || dark[cy*cols+cx] == grayscale_white {
