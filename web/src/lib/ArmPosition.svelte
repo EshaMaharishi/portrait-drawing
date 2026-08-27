@@ -30,14 +30,13 @@
 <section class="step" class:locked>
   <div class="step-head">
     <span class="step-num">1</span>
-    <h2>Move the arm out of the way</h2>
+    <h2>Go to picture taking position</h2>
   </div>
   <div class="row">
     <button onclick={goToPicturePosition} disabled={moving || locked || !positions.current}>
       <span class="icon">📷</span>
       {moving ? 'Moving arm…' : 'Go to picture-taking position'}
     </button>
-    <p class="hint">Parks the arm so it isn't in the camera's view.</p>
   </div>
   {#if error}<div class="banner error">{error}</div>{/if}
 </section>

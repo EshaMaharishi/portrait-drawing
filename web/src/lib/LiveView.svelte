@@ -11,13 +11,20 @@
   }: { partID: string; threshold: number; spacingMM: number; drawing?: boolean } = $props()
 
   // While a draw runs, show a frozen copy of the preview as it was when Draw
-  // was clicked, instead of the live feeds.
+  // was clicked, instead of the live feeds. If the page opened mid-draw there
+  // is no preview yet, so fetch one (polling is paused while drawing) and
+  // freeze that.
   let frozenSrc = $state<string | undefined>()
   $effect(() => {
-    if (drawing) {
-      if (!frozenSrc) frozenSrc = previewSrc
-    } else {
+    if (!drawing) {
       frozenSrc = undefined
+      return
+    }
+    if (frozenSrc) return
+    if (previewSrc) {
+      frozenSrc = previewSrc
+    } else if (imageToPoses.current) {
+      refreshPreview()
     }
   })
 
@@ -83,7 +90,13 @@
 <section class="views">
   {#if drawing}
     <figure class="tile hero drawing">
-      <img src={frozenSrc ?? previewSrc} alt="What the robot is drawing" />
+      {#if frozenSrc}
+        <img src={frozenSrc} alt="What the robot is drawing" />
+      {:else if previewError}
+        <div class="banner error" style="margin: 0.75rem">{previewError}</div>
+      {:else}
+        <p class="hint" style="padding: 2rem; text-align: center">Loading the drawing…</p>
+      {/if}
       <figcaption><span>🤖 Drawing this</span></figcaption>
     </figure>
   {:else}
