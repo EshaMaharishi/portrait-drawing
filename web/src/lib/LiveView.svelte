@@ -3,12 +3,7 @@
   import { CameraClient } from '@viamrobotics/sdk'
   import { RESOURCES, errorMessage } from '../viam'
 
-  let {
-    partID,
-    threshold = $bindable(),
-    spacingMM = $bindable(),
-    locked = false,
-  }: { partID: string; threshold: number; spacingMM: number; locked?: boolean } = $props()
+  let { partID, threshold, spacingMM }: { partID: string; threshold: number; spacingMM: number } = $props()
 
   const imageToPoses = createResourceClient(CameraClient, () => partID, () => RESOURCES.imageToPoses)
 
@@ -68,12 +63,7 @@
   })
 </script>
 
-<section class="step" class:locked class:active={!locked}>
-  <div class="step-head">
-    <span class="step-num">2</span>
-    <h2>Check the picture and adjust</h2>
-  </div>
-
+<section class="views">
   <div class="tiles">
     <figure class="tile hero">
       <CameraImage {partID} name={RESOURCES.sketched} refetchInterval={2000} width="100%" alt="Sketch" />
@@ -97,20 +87,4 @@
       <figcaption><span>Background removed</span></figcaption>
     </figure>
   </div>
-
-  <div class="sliders">
-    <label class="slider">
-      <span>Darkness</span>
-      <span class="value">{threshold}</span>
-      <input type="range" min="0" max="255" step="1" bind:value={threshold} disabled={locked} />
-      <span class="hint">Higher keeps more of the sketch (more dots, longer drawing).</span>
-    </label>
-    <label class="slider">
-      <span>Dot spacing</span>
-      <span class="value">{spacingMM.toFixed(1)} mm</span>
-      <input type="range" min="0.5" max="5" step="0.1" bind:value={spacingMM} disabled={locked} />
-      <span class="hint">Smaller is finer detail; larger draws faster.</span>
-    </label>
-  </div>
-  {#if locked}<p class="hint" style="margin-top: 0.5rem">Settings are locked while the robot is drawing.</p>{/if}
 </section>

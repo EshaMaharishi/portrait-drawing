@@ -37,7 +37,7 @@
       <span class="icon">📷</span>
       {moving ? 'Moving arm…' : 'Go to picture-taking position'}
     </button>
-    <p class="hint">Sends the arm to its parked pose so it isn't in the camera's view.</p>
+    <p class="hint">Parks the arm so it isn't in the camera's view.</p>
   </div>
   {#if error}<div class="banner error">{error}</div>{/if}
 </section>

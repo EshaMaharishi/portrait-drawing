@@ -97,7 +97,7 @@
     <h2>Draw</h2>
   </div>
 
-  <div class="row">
+  <div class="row nowrap">
     {#if finished}
       <button class="huge" onclick={() => (acknowledged = true)}><span class="icon">↩</span> Draw another</button>
     {:else}
