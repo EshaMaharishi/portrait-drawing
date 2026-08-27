@@ -106,8 +106,8 @@
       <figcaption><span>Camera</span></figcaption>
     </figure>
     <figure class="tile small">
-      <CameraImage {partID} name={RESOURCES.personOnly} refetchInterval={1000} width="100%" alt="Background removed" />
-      <figcaption><span>Background removed</span></figcaption>
+      <CameraImage {partID} name={RESOURCES.face} refetchInterval={1000} width="100%" alt="Face" />
+      <figcaption><span>Face</span></figcaption>
     </figure>
     <figure class="tile hero">
       <CameraImage {partID} name={RESOURCES.sketched} refetchInterval={2000} width="100%" alt="Sketch" />

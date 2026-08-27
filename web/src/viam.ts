@@ -4,6 +4,7 @@ import { Struct, type JsonValue, type Resource } from '@viamrobotics/sdk'
 export const RESOURCES = {
   camera: 'camera-1',
   personOnly: 'person-only',
+  face: 'face',
   sketched: 'sketched',
   imageToPoses: 'image-to-poses',
   posesToArm: 'poses-to-arm',

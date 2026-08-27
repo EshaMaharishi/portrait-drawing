@@ -11,6 +11,7 @@ import (
 	"go.viam.com/test"
 
 	"portrait-drawing/backgroundremoval"
+	"portrait-drawing/facecrop"
 	"portrait-drawing/imagetoposes"
 	"portrait-drawing/posesto3dscene"
 	"portrait-drawing/posestoarm"
@@ -23,6 +24,7 @@ func TestModelsRegistered(t *testing.T) {
 	for _, am := range []resource.APIModel{
 		{API: camera.API, Model: imagetoposes.Model},
 		{API: camera.API, Model: backgroundremoval.Model},
+		{API: camera.API, Model: facecrop.Model},
 		{API: generic.API, Model: posestoarm.Model},
 		{API: worldstatestore.API, Model: posesto3dscene.Model},
 		{API: genericcomponent.API, Model: web.Model},

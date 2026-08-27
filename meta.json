@@ -14,6 +14,10 @@
       "model": "chess-piece-detection:portrait-drawing:background-removal"
     },
     {
+      "api": "rdk:component:camera",
+      "model": "chess-piece-detection:portrait-drawing:face-crop"
+    },
+    {
       "api": "rdk:service:generic",
       "model": "chess-piece-detection:portrait-drawing:poses-to-arm"
     },

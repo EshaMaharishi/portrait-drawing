@@ -12,6 +12,7 @@ import (
 	"go.viam.com/rdk/services/worldstatestore"
 
 	"portrait-drawing/backgroundremoval"
+	"portrait-drawing/facecrop"
 	"portrait-drawing/imagetoposes"
 	"portrait-drawing/posesto3dscene"
 	"portrait-drawing/posestoarm"
@@ -22,6 +23,7 @@ func main() {
 	module.ModularMain(
 		resource.APIModel{API: camera.API, Model: imagetoposes.Model},
 		resource.APIModel{API: camera.API, Model: backgroundremoval.Model},
+		resource.APIModel{API: camera.API, Model: facecrop.Model},
 		resource.APIModel{API: generic.API, Model: posestoarm.Model},
 		resource.APIModel{API: worldstatestore.API, Model: posesto3dscene.Model},
 		resource.APIModel{API: genericcomponent.API, Model: web.Model},
