@@ -34,8 +34,8 @@ func TestImageToPoints(t *testing.T) {
 	// Long side is 4px -> 63.5mm per pixel. Height is 2px = 127mm, so the
 	// image is centered vertically with a 63.5mm offset.
 	want := [][3]float64{
-		{31.75, 95.25, 0},   // pixel (0,0): center at 0.5*63.5, 63.5 + 0.5*63.5
-		{222.25, 158.75, 0}, // pixel (3,1): center at 3.5*63.5, 63.5 + 1.5*63.5
+		{31.75, 95.25, 1},   // pixel (0,0): center at 0.5*63.5, 63.5 + 0.5*63.5
+		{222.25, 158.75, 1}, // pixel (3,1): center at 3.5*63.5, 63.5 + 1.5*63.5
 	}
 	for i, p := range points {
 		if p != want[i] {
@@ -64,10 +64,10 @@ func TestImageToPointsNearestNeighborOrder(t *testing.T) {
 	// neighbor (1,0) one cell away, then (0,2) (sqrt(5) cells from (1,0),
 	// closer than (3,2) at sqrt(8)), then (3,2).
 	want := [][3]float64{
-		{31.75, 63.5, 0},
-		{95.25, 63.5, 0},
-		{31.75, 190.5, 0},
-		{222.25, 190.5, 0},
+		{31.75, 63.5, 1},
+		{95.25, 63.5, 1},
+		{31.75, 190.5, 1},
+		{222.25, 190.5, 1},
 	}
 	if len(points) != len(want) {
 		t.Fatalf("expected %d points, got %d: %v", len(want), len(points), points)
@@ -263,8 +263,9 @@ func TestImageToPointsDownsamples(t *testing.T) {
 	points := imageToPoints(img, 128, 254.0, 254.0, 127.0, 1)
 
 	// The image spans 254mm x 127mm, so yOffset is 63.5mm. The kept cell's
-	// center is at (0.5*127, 63.5 + 0.5*127).
-	want := [3]float64{63.5, 127.0, 0}
+	// center is at (0.5*127, 63.5 + 0.5*127). Its average of 127.5 is only
+	// just below the threshold, so it barely dwells: (128-127.5)/(128-64).
+	want := [3]float64{63.5, 127.0, 0.5 / 64}
 	if len(points) != 1 || points[0] != want {
 		t.Fatalf("expected exactly [%v], got %v", want, points)
 	}
@@ -370,5 +371,34 @@ func TestGetPosesDarkness(t *testing.T) {
 	}
 	if dwells != 4 {
 		t.Errorf("expected 4 collapsed dots at darkness 1.0, got %d", dwells)
+	}
+}
+
+func TestCellDarkness(t *testing.T) {
+	// With threshold 128 the black cutoff is 64: at or below it a cell dwells
+	// fully, and the level ramps to 0 at the threshold, where a cell stops
+	// being drawn at all.
+	for _, tc := range []struct {
+		avg  float64
+		want float64
+	}{
+		{0, 1},     // pure black
+		{64, 1},    // exactly the black cutoff
+		{80, 0.75}, // a quarter of the way from cutoff to threshold
+		{96, 0.5},  // halfway
+		{128, 0},   // exactly the threshold
+		{200, 0},   // lighter than the threshold; not drawn
+	} {
+		if got := cellDarkness(tc.avg, 128); got != tc.want {
+			t.Errorf("cellDarkness(%v, 128) = %v, want %v", tc.avg, got, tc.want)
+		}
+	}
+
+	// A zero threshold must not divide by zero.
+	if got := cellDarkness(0, 0); got != 1 {
+		t.Errorf("cellDarkness(0, 0) = %v, want 1", got)
+	}
+	if got := cellDarkness(10, 0); got != 0 {
+		t.Errorf("cellDarkness(10, 0) = %v, want 0", got)
 	}
 }

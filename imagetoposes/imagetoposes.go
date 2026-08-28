@@ -746,8 +746,9 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 		}
 	}
 
-	// Mark the dark cells.
+	// Mark the dark cells and how dark each one is.
 	dark := make([]grayscale_color, cols*rows)
+	darknesses := make([]float64, cols*rows)
 	for cy := range rows {
 		for cx := range cols {
 			cell := cy*cols + cx
@@ -760,12 +761,13 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 				} else {
 					dark[cell] = grayscale_white
 				}
+				darknesses[cell] = cellDarkness(avg, float64(threshold))
 			} else {
 				dark[cell] = grayscale_white
 			}
 		}
 	}
-	darknesses := collapseDenseBlocks(dark, cols, rows, denseN)
+	collapseDenseBlocks(dark, darknesses, cols, rows, denseN)
 
 	// Count the remaining dark cells and find the one closest to the area's
 	// top-left corner (0, 0) to start from.
@@ -810,13 +812,10 @@ func imageToPoints(img image.Image, threshold uint8, sizeXMM, sizeYMM, spacingMM
 // with its single center cell. Blocks are tiled from the grid's top-left;
 // partial blocks at the right/bottom edges and blocks with any light cell
 // are left untouched.
-func collapseDenseBlocks(dark []grayscale_color, cols, rows, n int) []float64 {
-	// Callers index the result by cell, so return a zero (no dwell) level for
-	// every cell rather than nil when there is nothing to collapse.
+func collapseDenseBlocks(dark []grayscale_color, darknesses []float64, cols, rows, n int) {
 	if n <= 1 {
-		return make([]float64, len(dark))
+		return
 	}
-	darknesses := make([]float64, len(dark))
 	for by := 0; by+n <= rows; by += n {
 		for bx := 0; bx+n <= cols; bx += n {
 			full := true
@@ -842,6 +841,7 @@ func collapseDenseBlocks(dark []grayscale_color, cols, rows, n int) []float64 {
 			for cy := by; cy < by+n; cy++ {
 				for cx := bx; cx < bx+n; cx++ {
 					dark[cy*cols+cx] = grayscale_white
+					darknesses[cy*cols+cx] = 0
 				}
 			}
 			if numFullBlack > numGray {
@@ -852,7 +852,20 @@ func collapseDenseBlocks(dark []grayscale_color, cols, rows, n int) []float64 {
 			darknesses[(by+n/2)*cols+(bx+n/2)] = float64(numFullBlack) / (float64(numFullBlack) + float64(numGray))
 		}
 	}
-	return darknesses
+}
+
+// cellDarkness maps a grid cell's average gray value to a dwell level: 1.0 at
+// or below the black cutoff (half the threshold), ramping linearly down to 0 at
+// the threshold itself, where the cell is too light to draw at all.
+func cellDarkness(avg, threshold float64) float64 {
+	black := threshold / 2
+	if avg <= black {
+		return 1
+	}
+	if avg >= threshold {
+		return 0
+	}
+	return (threshold - avg) / (threshold - black)
 }
 
 // nearestDark returns the dark cell closest (by Euclidean distance) to

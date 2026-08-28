@@ -35,7 +35,7 @@ const (
 
 // maxDwellSeconds is how long the pen pauses on a fully dark (darkness 1.0)
 // dot to let ink bleed in; dwell scales linearly with the dot's darkness.
-const maxDwellSeconds = 2
+const maxDwellSeconds = 0.25
 
 // drawPose is one pose in the drawing sequence; linear marks poses that
 // should be reached on a straight-line-constrained path.
@@ -305,6 +305,7 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	s.mu.Unlock()
 
 	for i, pose := range poses {
+		s.logger.Infof("about to draw pose: %v", pose)
 		if ctx.Err() != nil {
 			s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
 			finish(stateStopped, i, len(poses), nil)
@@ -331,16 +332,19 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 			finish(stateError, i, len(poses), fmt.Errorf("failed to move to pose %d of %d: %w", i+1, len(poses), err))
 			return
 		}
+		// Dwell on the dot: holding the pen still lets ink bleed into the
+		// paper, so darker dots get a longer pause.
+		dwell := time.Duration(pose.darkness * maxDwellSeconds * float64(time.Second))
+		if dwell.Seconds() > 0 {
+			s.logger.Infof("pausing for %0.4f seconds", dwell.Seconds())
+		}
+		time.Sleep(dwell)
 		s.mu.Lock()
 		s.completed = i + 1
 		s.mu.Unlock()
 		if (i+1)%100 == 0 {
 			s.logger.Infof("drew %d of %d poses", i+1, len(poses))
 		}
-		// Dwell on the dot: holding the pen still lets ink bleed into the
-		// paper, so darker dots get a longer pause.
-		dwell := time.Duration(pose.darkness * maxDwellSeconds * float64(time.Second))
-		time.Sleep(dwell)
 	}
 
 	s.logger.Infof("drawing complete: %d poses", len(poses))
