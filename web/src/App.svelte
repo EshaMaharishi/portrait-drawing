@@ -14,6 +14,7 @@
 
   // Shared tuning values: Capture edits them, Draw sends them with draw.
   let spacingMM = $state(1)
+  let shading = $state(true)
   let drawing = $state(false)
   let completed = $state(0)
 
@@ -40,8 +41,8 @@
     <div class="layout">
       <div class="controls">
         <PaperSetup partID={connection.machineId} locked={drawing} />
-        <Adjust partID={connection.machineId} bind:spacingMM locked={drawing} />
-        <Draw partID={connection.machineId} {spacingMM} bind:drawing bind:completed />
+        <Adjust partID={connection.machineId} bind:spacingMM bind:shading locked={drawing} />
+        <Draw partID={connection.machineId} {spacingMM} {shading} bind:drawing bind:completed />
       </div>
       <LiveView partID={connection.machineId} {spacingMM} {drawing} {completed} />
     </div>

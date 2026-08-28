@@ -6,9 +6,16 @@
   let {
     partID,
     spacingMM,
+    shading,
     drawing = $bindable(false),
     completed = $bindable(0),
-  }: { partID: string; spacingMM: number; drawing?: boolean; completed?: number } = $props()
+  }: {
+    partID: string
+    spacingMM: number
+    shading: boolean
+    drawing?: boolean
+    completed?: number
+  } = $props()
 
   const arm = createResourceClient(GenericServiceClient, () => partID, () => RESOURCES.posesToArm)
 
@@ -69,7 +76,7 @@
     if (!arm.current) return
     error = ''
     try {
-      await doCommand(arm.current, { command: 'draw', point_spacing_mm: spacingMM })
+      await doCommand(arm.current, { command: 'draw', point_spacing_mm: spacingMM, shading })
       status = { state: 'fetching', completed: 0, total: 0, error: '' }
     } catch (err) {
       error = errorMessage(err)

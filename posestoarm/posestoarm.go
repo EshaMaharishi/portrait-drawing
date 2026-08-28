@@ -161,7 +161,9 @@ func newPosesToArm(
 //	{"command": "draw"} - fetches the poses from the image-to-poses camera's
 //	get_poses command and moves the configured arm through them, using the
 //	motion service. Optional "threshold" and "point_spacing_mm" are forwarded
-//	to get_poses as overrides. The draw runs in the background and this
+//	to get_poses as overrides. Optional "shading" (default true) controls
+//	whether the pen dwells on darker dots to bleed more ink in; false draws
+//	every dot with a single touch. The draw runs in the background and this
 //	command returns immediately with {"status": "started"}; poll "status" for
 //	progress. Only one draw may run at a time.
 //	{"command": "show_paper"} - asks the camera where the paper is (its
@@ -192,7 +194,14 @@ func (s *posesToArm) DoCommand(ctx context.Context, cmd map[string]any) (map[str
 				posesCmd[key] = v
 			}
 		}
-		if err := s.startAction(stateFetching, func(ctx context.Context) { s.runDraw(ctx, posesCmd) }); err != nil {
+		// Shading dwells on the darker dots to bleed more ink in; with it off
+		// every dot gets a single touch. Absent means on, so callers that do
+		// not know about the flag keep the shaded behavior.
+		shading := true
+		if v, ok := cmd["shading"].(bool); ok {
+			shading = v
+		}
+		if err := s.startAction(stateFetching, func(ctx context.Context) { s.runDraw(ctx, posesCmd, shading) }); err != nil {
 			return nil, err
 		}
 		return map[string]any{"status": "started"}, nil
@@ -285,7 +294,7 @@ func (s *posesToArm) finish(state string, completed, total int, err error) {
 
 // runDraw fetches the poses and moves the arm through them, recording
 // progress in the service's state until it finishes, fails, or is cancelled.
-func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
+func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any, shading bool) {
 	finish := s.finish
 
 	poses, dr, err := s.fetchPoses(ctx, posesCmd)
@@ -305,7 +314,6 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 	s.mu.Unlock()
 
 	for i, pose := range poses {
-		s.logger.Infof("about to draw pose: %v", pose)
 		if ctx.Err() != nil {
 			s.logger.Infof("draw stopped after %d of %d poses", i, len(poses))
 			finish(stateStopped, i, len(poses), nil)
@@ -333,12 +341,15 @@ func (s *posesToArm) runDraw(ctx context.Context, posesCmd map[string]any) {
 			return
 		}
 		// Dwell on the dot: holding the pen still lets ink bleed into the
-		// paper, so darker dots get a longer pause.
-		dwell := time.Duration(pose.darkness * maxDwellSeconds * float64(time.Second))
-		if dwell.Seconds() > 0 {
-			s.logger.Infof("pausing for %0.4f seconds", dwell.Seconds())
+		// paper, so darker dots get a longer pause. With shading off nothing
+		// dwells and every dot is drawn with a single touch.
+		if shading {
+			dwell := time.Duration(pose.darkness * maxDwellSeconds * float64(time.Second))
+			if dwell.Seconds() > 0 {
+				s.logger.Infof("pausing for %0.4f seconds", dwell.Seconds())
+			}
+			time.Sleep(dwell)
 		}
-		time.Sleep(dwell)
 		s.mu.Lock()
 		s.completed = i + 1
 		s.mu.Unlock()
